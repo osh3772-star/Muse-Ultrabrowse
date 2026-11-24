@@ -60,5 +60,5 @@ UltraBrowse는 ego lite 하네스를 스톡 Chromium CDP 위에서 돌리는 ego
 ## 한계
 
 - VM egress IP가 사이트에 막히면(예: 나무위키 Cloudflare) 이 레인으로는 못 연다.
-  browser-chain 스킬의 폴백 순서(L1 UltraBrowse → L2 agent-browser(H255) → L3 ego-lite-h255 → L4 클라우드)를 따른다.
+  browser-chain 스킬의 폴백 순서(L1 UltraBrowse → L2 클라우드 브라우저)를 따른다.
 - 스텔스는 정식 포크(ego lite)가 아니라 스톡 Chromium + CDP라 봇 차단이 강한 사이트에선 약하다.
