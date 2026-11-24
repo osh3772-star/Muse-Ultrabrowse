@@ -1,0 +1,5 @@
+# agent-vault 내용물 — 키·암호화 항목은 설치한 로컬에서만 생성·저장한다.
+# 어떤 경우에도 커밋·업로드 금지. (패키지에 포함되는 것은 vault.py 도구와 스킬뿐이다.)
+agent-vault/keys/
+agent-vault/entries/
+agent-vault/meta.json
