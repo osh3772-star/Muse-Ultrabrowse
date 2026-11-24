@@ -1,8 +1,13 @@
-# ultrabrowse — VM 로컬 브라우저 도구 (muse-ultra-browser)
+---
+name: muse-ultra-browser
+description: Muse Ultra Browser (뮤즈 울트라브라우즈) — VM 로컬 브라우저 (체인 L1) 직접 호출용
+---
 
-이 VM(메타 테스트베드)에서 웹페이지를 열고 읽을 때 쓰는 로컬 브라우저 하네스.
-운전은 외부 API가 아니라 Muse 본인이 exec로 JS를 넘겨 판단·조작하는 방식이다.
-인증서 검증은 켜져 있고(정상 신뢰), 일반 사이트에 쓸 수 있다.
+# Muse Ultra Browser — 실행 절차
+
+상태: 설치 완료·동작 중 (2026-11-24). 기록: `~/workspace/browser-chain-install-2026-11-24.md`,
+운용 설계: `~/workspace/browser-chain-redesign-2026-11-24.md`.
+일반 읽기는 이 스킬이 아니라 browser-chain의 `chain.sh read`(L0 우선)를 쓴다.
 
 ## 설치 직후 브리핑 (설치한 뮤즈가 1회만)
 
@@ -11,92 +16,77 @@
 1. **화면은 직접 볼 수 없다** — 울트라 브라우저는 VM 내부에서 도는 브라우저라 사용자가 직접 화면을 볼 수 없다. 사용자가 보고 싶어 하면 스크린샷을 찍어 보여줄 수 있다.
 2. **체인 구조** — 일반 읽기는 L0(경량 fetch) → L1(이 브라우저) → L2(클라우드 브라우저) 순으로 내려간다. 로그인 세션이 PC에 있는 사이트(부동산뱅크·직방 등)는 이 브라우저가 아니라 H255의 agent-browser가 담당한다.
 3. **세션 영속** — 작업 공간이 프로필의 기본 컨텍스트를 써서, 한 번 로그인하면 데몬이 재시작돼도(완전 재시작 포함) 로그인 상태가 유지된다. 단 작업 공간끼리 스토리지를 공유하므로 사이트별 격리는 없다.
-4. **로그인 자격증명** — 자격증명이 필요한 로그인은 이 패키지에 포함된 agent-vault 스킬(`skills/agent-vault/`)을 따른다. 패키지에 포함되는 것은 볼트 도구와 스킬뿐이고, 키·암호화 항목 같은 내용물은 설치한 로컬에서만 생성·저장되며 레포에 올리지 않는다. 비밀번호를 채팅으로 주고받지 않는다.
+4. **로그인 자격증명은 agent-vault 절차로** — 로그인이 필요한 사이트는 별도 로컬 볼트(agent-vault)를 쓴다: 사용자가 파일로 값을 넣어주면 암호화해 저장하고 원본 파일은 파쇄하며, 에이전트는 값을 보지 못한다. **비밀번호를 채팅으로 보내지 말 것**도 이때 사용자에게 안내한다. 상세 절차는 agent-vault 스킬을 따른다.
 5. **차단되면 다음 출구로** — 한 경로가 차단·실패하면 멈춰서 보고만 하지 말고, 체인의 다음 출구로 전환해 계속 진행한다.
 6. **자원 사용** — 데몬은 호출이 없으면 idle 120초에 자동 정지한다. 구동 중 메모리는 데몬+Chrome 합쳐 1GB 남짓이다.
 
-## 호출법
-```bash
-# 데몬 예열 (작업 전 1회 권장 — 아래 '데몬 웜 유지' 참조)
-~/workspace/muse-ultra-browser-build/meta-muse-ultra/run.sh warm
-# 자주 쓰는 작업 (후처리 포함, 권장)
-~/workspace/muse-ultra-browser-build/meta-muse-ultra/run.sh open https://example.com   # 이동 + 스냅샷(구조 유지)
-~/workspace/muse-ultra-browser-build/meta-muse-ultra/run.sh read https://example.com   # 본문 텍스트만 추출
-# 임의 JS
-~/workspace/muse-ultra-browser-build/meta-muse-ultra/run.sh 'const t = await taskSpace("s"); const p = await t.newPage(); await p.goto("https://example.com"); console.log(await p.snapshot()); await t.finish({keep: []});'
-# 파일로: run.sh -f script.js
-# 데몬 상태/종료: muse-ultra-browser status / muse-ultra-browser stop  (PATH에 ~/.local/bin 필요)
-```
-- 모든 호출에 하드 타임아웃 60초가 걸려 있다 (run.sh 내장).
-- 실측 지연: 가벼운 페이지 건당 웜 1.4~4.4초, 콜드(데몬 정지 후 첫 호출) ~15초.
-  데몬 정지 상태에서 첫 호출이 실패하던 레이스는 수정됨 — 첫 호출이 알아서
-  데몬을 깨우므로 재시도하지 말고 결과를 기다릴 것.
-- 원샷 실측 (2026-11-21, HN 상위 3글 원샷 스크립트): 콜드 `-f` 1회 18.1초,
-  웜 3.6~4.1초. `-f` 경로에도 콜드 소켓 레이스 시 래퍼 내부 1회 자동 재시도가
-  들어갔다 (이전에는 open/read만 있었고, -f 콜드 실패를 실측으로 확인함).
+## 차단 회피와 대응 (전 사이트 공통, 2026-11-24 사용자 지시로 반영)
 
-## 데몬 웜 유지 (2026-11-21)
-- 데몬(muse-ultra-browser serve) 소스에는 **유휴 종료 타이머가 없다**. 설계상 종료
-  조건은 `muse-ultra-browser stop`, Chromium 크래시(데몬 동반 종료 → 다음 호출에서
-  재생성), VM 재부팅뿐이다. 따라서 웜 유지는 "한 번 띄워 두기"로 충분하고
-  별도 keepalive 루프는 두지 않는다.
-  - 단, 2026-11-21 측정 직후 한 차례 데몬이 로그 없이 정지 상태로 발견된
-    적이 있다 (원인 미확인, warm 재실행으로 즉시 복구). 장시간 상주가
-    필요하면 작업 전 status 확인 + warm을 습관으로 할 것.
-- `run.sh warm`: 데몬이 없으면 띄우고 about:blank 페이지로 예열한 뒤
-  `muse-ultra-browser status`로 상주를 확인해 준다. 콜드에서 실측 14.2초.
-- 작업 세션 시작 시 warm을 한 번 돌려 두면 이후 호출은 전부 웜 속도다.
-  VM이 재부팅되면 데몬은 사라지므로 그때 다시 warm이 필요하다.
-  단, 노드 수만 개급 거대 페이지의 read(full_page 스냅샷)는 ~50초가 걸릴 수
-  있어 60초 타임아웃에 근접한다 — 그런 페이지는 open(뷰포트)부터 볼 것.
-  (스크롤 분할은 실측상 역효과라 미적용. 근거는 meta-muse-ultra/README.md 패스 기록.)
-- 스냅샷 후처리(snaptrim): 원본 대비 trim -18~21%, text -88% 수준 (Wikipedia Seoul 실측).
+차단은 대개 출구 IP 자체가 아니라 **세션 유무와 요청 방식**에서 온다.
+
+- 쿠키·JS 없는 fetch 실패만으로 차단 판정을 내리지 않는다 — 세션에 민감한 사이트는 이 브라우저(세션 유지, 사람 속도)로 확인한 뒤에 판정한다.
+- 사람 속도를 지킨다: 연속 클릭, 새로고침 루프, 매크로식 반복, 짧은 시간 과다 요청 금지. 민감 구간(결제·본인인증·대량 요청)은 한 번에 하나씩.
+- VPN·프록시로 IP를 속이는 우회는 하지 않는다.
+- 실제로 차단되면 같은 방식으로 재시도를 반복하지 말고 중단해서 사용자에게 알린다 (사이트·레인·코드·현상).
+
+## 호출
+
+```bash
+META=~/workspace/muse-ultra-browser-build/meta-muse-ultra
+$META/run.sh open <url>     # 이동 + 스냅샷 (구조)
+$META/run.sh read <url>     # 본문 텍스트 (full_page; 실패 시 viewport 1회 자동 폴백)
+$META/run.sh read --fp <url>  # 노카드 모드 (아래)
+$META/run.sh -f script.js   # 임의 JS (파일로만 — 파이프 입력은 hang)
+$META/fetch.sh <url>        # L0 단독 (브라우저 없음)
+```
+
+**노카드 모드 `--fp` (2026-11-24 실측)**: exec 네트워크 승인은 호스트마다 카드가 뜨는데,
+페이지 본체가 아니라 광고·추적 서브리소스 호스트가 대부분이다. `--fp`는 CDP Fetch로
+전 요청을 가로채 ① 대상 호스트 정확 일치(www 유무 변형 포함)만 통과, 서브도메인 포함
+전부 차단 ② 추출이 끝나 페이지가 닫힐 때까지 차단을 유지(늦게 나가는 비콘 누수 방지)
+③ 이미지·폰트·미디어는 1차 호스트라도 차단한다. 실측: 연합뉴스 기사 read — 카드 9장+
+나오던 조건에서 **0장**, 본문 10,506자 정상. 광고·집계가 많은 페이지(뉴스 등)를
+exec로 읽을 때는 기본으로 `--fp`를 붙여라. 단, 본문이 서브도메인 JS에 의존하는
+페이지는 비어 보일 수 있으니 그때만 빼고 재시도한다.
+
+## 출력 계약
+
+- 성공: 본문 + `%%CHAIN%% lane=L1 … status=ok …` 1줄, exit 0
+- 실패: 결과 1줄만, exit 1. 코드: F-IP(차단)/F-BOT(캡차)/F-EMPTY(100자 미만)/F-TIMEOUT(60초)/F-NET
+- 실패 본문이 꼭 필요하면 `UB_DEBUG=1`을 붙인다 (stderr로 나간다). 평소에는 붙이지 마라 — 토큰 낭비다.
+
+## 운용 규칙
+
+- 콜드 ~5초 / 웜 ~2초. 데몬은 첫 호출이 자동 기동한다. **미리 깨우지 마라** (`status`는 안 깨운다).
+- idle 120초 무호출이면 데몬+릴레이 자동 정지. 연속 작업이면 시작할 때 `$META/run.sh keep`,
+  끝나면 `$META/run.sh stop`.
+- **세션 영속 (2026-11-24 변경)**: 작업 공간이 프로필의 기본 컨텍스트를 써서 쿠키·localStorage·
+  IndexedDB가 프로필 디렉터리에 저장된다. 공간을 닫거나 데몬이 내려가도(완전 재시작 포함)
+  로그인이 유지되므로, keep은 세션 유지 목적으론 불필요하다(데몬 상주 목적일 때만).
+  단 공간끼리 스토리지를 공유한다(사이트별 격리 없음). 공간 id는 데몬 재시작 시 초기화되니
+  `claimTaskSpace(id)` 재진입은 같은 데몬이 떠 있는 동안만 유효하다.
+  옛 일회성 동작이 필요하면 데몬 기동 전 `MUSE_ULTRA_EPHEMERAL=1`을 건다(데몬을 처음 띄우는
+  호출의 환경에 적용). 기록: `~/workspace/ultra-persist-change-2026-11-24.md`.
+- 메모리: 데몬 ~90MB + Chrome ~1.1GB RSS (구동 중에만).
+
+## 데몬 환경변수와 자격증명 (agent-vault 연동)
+
+- `-f` 스크립트는 **데몬 프로세스 안에서 실행**되므로, 스크립트가 보는 환경변수는 호출 시점이 아니라 **데몬 기동 시점의 환경**이다. 이미 떠 있는 데몬에는 나중에 export한 값이 닿지 않는다.
+- 자격증명이 필요한 작업(로그인 등)은 데몬을 agent-vault로 래핑해 기동한다: 기존 데몬을 정지한 뒤 `python3 ~/workspace/agent-vault/vault.py use <항목> --via env -- $META/run.sh open <url>` 로 띄우면, 데몬 내 스크립트가 `AGENT_VAULT_VALUE`로 값을 읽을 수 있다.
+- 값은 어떤 출력·로그·파일에도 남기지 않는다. 상세 절차(로그인 단계, 2FA 정지·재개, 승인 후 영속 확인)는 agent-vault 스킬의 "Ultra Browser 로그인 (실증 절차)" 절을 따른다.
+
+## 금지·주의
+
+- 반드시 `config.env`의 CHROME_PATH(chrome-wrapper.sh) 경유로만 실행. 스톡 Chromium 직접 실행 금지.
+  `--ignore-certificate-errors` 금지 (인증서 검증 ON이 기본). `/opt/meta-chromium/chrome` 사용 금지.
+- H255에 세션이 있는 사이트(부동산뱅크·직방)는 이 도구가 아니라 H255 agent-browser로.
+- 런처 본체(`~/.local/bin/muse-ultra-browser`)는 2026-11-24 이름 전면 변경으로 파일명·내부 표기만 Muse Ultra Browser로 바뀐 것 — 기능·동작은 변경 전과 동일하다. 임의로 다른 빌드로 교체하지 않는다.
 
 ## 경로
-- 래퍼: `~/workspace/muse-ultra-browser-build/meta-muse-ultra/run.sh`
-- 설정: `~/workspace/muse-ultra-browser-build/meta-muse-ultra/config.env` (없으면 `config.env.example` 복사)
-  - API 등록 슬롯 `MUSE_ULTRA_API_PROVIDER` / `MUSE_ULTRA_API_KEY` — 현재 미등록, 등록만 가능한 상태로 둘 것
-- 본체: `~/.local/bin/muse-ultra-browser` (v4.0.0), 소스 `~/workspace/muse-ultra-browser-build/src/`
-- 데몬 데이터: `~/.local/share/muse-ultra-browser/`
-- 프로필: `~/workspace/muse-ultra-browser-build/meta-muse-ultra/profile` (durable, config.env의 MUSE_ULTRA_PROFILE)
-- 인증서 신뢰 DB: `~/workspace/muse-ultra-browser-build/meta-muse-ultra/chrome-home/.pki/nssdb`
-  (egress CA를 CT,C,C로 임포트, `ensure-nssdb.sh`가 자동 유지)
 
-## 브라우저 지문 (2026-11-20 정상화)
-- UA는 정식 Chrome 159 (`HeadlessChrome` 표기 없음), 언어는 ko-KR 우선
-  (navigator.languages·Accept-Language 모두), WebGL 동작 (SwiftShader),
-  `navigator.webdriver` false. 전/후 실측표는 meta-muse-ultra/README.md.
-- open/read 경로는 CDP `Emulation.setUserAgentOverride`까지 자동 적용돼
-  Sec-Ch-Ua 브랜드가 `Google Chrome`으로 나간다. 임의 JS로 직접 페이지를
-  만들 때는 같은 일관성이 필요하면 페이지 생성 직후 동일 호출을 할 것:
-  `await p.cdp('Emulation.setUserAgentOverride', {userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/159.0.0.0 Safari/537.36', acceptLanguage: 'ko-KR,ko,en-US,en', platform: 'Linux'})`
-  (acceptLanguage에 q값을 넣으면 languages에 q값이 새니 태그만 넣을 것.)
-- 주의: 이 정상화는 지문 층의 얘기다. 출구 IP 자체를 막는 사이트(예: 나무위키 —
-  curl도 403)는 이걸로 안 풀린다.
-
-## 세션 유지법 (2026-11-24 영속화로 정정)
-- 런처가 프로필의 기본 컨텍스트를 쓴다. 쿠키·localStorage·IndexedDB가 프로필
-  디렉터리(profile/Default)에 저장되므로, 작업 공간을 닫으면 탭만 닫히고 로그인
-  상태는 디스크에 남는다. 데몬을 완전히 정지했다가 일반 호출로 다시 띄워도
-  로그인이 유지된다 (구글 로그인 end-to-end로 실측 확인됨).
-- 진행 중인 작업을 이어가려면 페이지를 keep하고, 같은 데몬이 떠 있는 동안
-  `claimTaskSpace(id)`로 재진입할 것. 공간 id는 데몬 재시작 시 초기화되므로
-  재진입은 같은 데몬 안에서만 유효하다.
-- 한계: 작업 공간끼리 스토리지를 공유한다 (사이트별 격리 없음).
-- 옛 일회성(격리 컨텍스트, 닫으면 쿠키 폐기) 동작이 필요하면 데몬을 처음 띄우는
-  호출 전에 `MUSE_ULTRA_EPHEMERAL=1`을 건다.
-
-## 제약 (중요)
-- **2026-11-20 설치·검증 완료**: Playwright로 받은 Chrome for Testing 159.0.8154.6 사용.
-  단, 스톡 Chromium 단독으로는 이 VM egress를 못 나간다 — 반드시 `config.env`의
-  CHROME_PATH(= `meta-muse-ultra/chrome-wrapper.sh`) 경유로 실행할 것. 래퍼는 socat 릴레이
-  (127.0.0.1:18080 → hatch-egress-proxy:3128)를 붙이고, Chrome의 HOME을 `chrome-home`으로
-  지정해 전용 NSS DB의 egress CA를 정상 신뢰시킨다. `--ignore-certificate-errors`는
-  쓰지 않는다 — 인증서 검증이 켜진 상태가 기본이다 (badssl 차단 + 로컬 분리 테스트로
-  검증됨. 자세한 근거는 meta-muse-ultra/README.md).
-- `/opt/meta-chromium/chrome`은 Hatch 전용 빌드라 단독 기동 불가 — 사용 금지.
-- run.sh 인자/파일 입력은 파일 리다이렉트 방식이다. muse-ultra-browser에 파이프로 JS를 넘기면
-  클라이언트가 종료되지 않는 행이 있으니 직접 호출 때도 heredoc/파일 입력을 쓸 것.
-- 일반 사이트 사용 가능. 단, 로그인 세션이 필요한 사이트는 이 도구의 프로필에
-  세션이 없으면 못 연다 — 그런 작업은 세션이 있는 브라우저 수단으로 보낼 것.
-- upstream 하네스(citrolabs/muse-ultra-browser)는 MIT 표기, muse-ultra-browser 자체 라이선스 파일은 없음.
+- 래퍼 디렉토리: `~/workspace/muse-ultra-browser-build/meta-muse-ultra/` (run.sh, fetch.sh, chain.sh, chrome-wrapper.sh,
+  idle-stop.sh, stop-relay.sh, snaptrim.py, html2text.py, routecache.py, route-cache.json, config.env)
+- 프로필: `meta-muse-ultra/profile` / 인증서 DB: `meta-muse-ultra/chrome-home/.pki/nssdb` (자동 유지)
+- 재설계 전 백업: `meta-muse-ultra/backup-2026-11-24/`
+- 영속화 변경 전 백업: `meta-muse-ultra/backup-persist-2026-11-24/` (런처 원본 + 스킬 원본)
+- 지문: UA 정식 Chrome 159, ko-KR, WebGL on, webdriver=false (래퍼+CDP 오버라이드가 자동 적용)

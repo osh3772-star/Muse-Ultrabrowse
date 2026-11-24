@@ -1,4 +1,8 @@
-# meta-muse-ultra — muse-ultra-browser 래퍼 (메타 테스트베드)
+# meta-muse-ultra — Muse Ultra Browser (뮤즈 울트라브라우즈) 래퍼
+
+> 표기: 이 도구의 현행 이름은 **Muse Ultra Browser (뮤즈 울트라브라우즈)**다 (2026-11-24 통일).
+> 런처 파일명(muse-ultra-browser)과 아래 본문의 과거 패스 기록은 이력으로 유지한다.
+> 현행 운용(체인 구조·idle 정지·결과 라인)은 `~/workspace/browser-chain-redesign-2026-11-24.md` 참조.
 
 muse-ultra-browser(Muse Ultra Browser의 Linux 포팅)를 이 VM에서 Muse가 exec로 운전하기 위한 래퍼.
 
@@ -121,7 +125,8 @@ read(full_page) 52.8초, full_page 스냅샷 단독 28.8초, **뷰포트 스냅�
   heredoc/파일 입력 권장, 파이프 입력은 피할 것.
 
 ## 제약
-- 일반 사이트 사용 가능 (인증서 검증 켜짐). 단, 로그인 세션이 필요한 사이트는
-  이 도구의 프로필에 그 세션이 생기는 것이 아니니 별도 수단이 필요하다.
+- 일반 사이트 사용 가능 (인증서 검증 켜짐). 단, H255 크롬에 세션이 있는 사이트
+  (부동산뱅크·직방)는 기존 라우팅대로 H255 agent-browser 담당 — 이 도구의 프로필에
+  그 세션이 생기는 것은 아니다.
 - 라이선스: muse-ultra-browser 저장소 자체에는 LICENSE 파일 없음. 내장 하네스는 citrolabs/muse-ultra-browser이며
   build-single.sh에 MIT로 표기됨. muse-ultra-browser.mjs 자체의 라이선스 표기는 확인되지 않음 (개인 테스트베드 사용).

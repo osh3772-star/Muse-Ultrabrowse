@@ -1,79 +1,220 @@
 #!/usr/bin/env bash
-# meta-muse-ultra: muse-ultra-browser 래퍼 (Muse 테스트베드 전용)
-# 사용법:
-#   run.sh warm         — 데몬+Chromium 예열 (상주 확인 포함)
-#   run.sh open <url>   — 이동 + 스냅샷 (구조 유지, trim 후처리)
-#   run.sh read <url>   — 이동 + 본문 텍스트 추출 (full_page 스냅샷 → text 후처리)
-#   run.sh '<JS 코드>'  — 임의 JS 실행
-#   run.sh -f script.js — JS 파일 실행
-#   echo '<JS>' | run.sh
-# 모든 muse-ultra-browser 호출에는 하드 타임아웃 60초가 걸린다 (과거 hang 재발 방지).
+# meta-muse-ultra: Muse Ultra Browser (muse-ultra-browser) wrapper — redesigned 2026-11-24.
+# Usage:
+#   run.sh open <url>    — navigate + snapshot (structure, trimmed)
+#   run.sh read <url>    — navigate + body text (full_page; viewport fallback x1)
+#   run.sh open|read --lean <url> — lean mode: block Image/Font/Media requests
+#                         via CDP Fetch (opt-in, default OFF; UB_LEAN=1 also works).
+#                         Read-only text/structure tasks only — never for login,
+#                         captcha or interactive work (pages can break).
+#   run.sh '<JS>'        — arbitrary JS
+#   run.sh -f script.js  — JS file
+#   run.sh keep          — disable idle auto-stop (daemon stays up)
+#   run.sh resume        — re-enable idle auto-stop
+#   run.sh stop          — stop daemon + relay now
+#   run.sh status        — daemon status
+# open/read/js print a final structured line:
+#   %%CHAIN%% lane=L1 mode=<m> status=ok|fail code=<F-*|-> elapsed_s=<n> chars=<n> via=<full|viewport|->
+# The launcher auto-starts its daemon on the first real call; do NOT pre-wait
+# for the socket (the old ensure_daemon loop burned ~10s waiting for a socket
+# that `muse-ultra-browser status` never creates — measured: direct cold 6.4s vs 19.9s).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# 선택 설정 로드 (API 슬롯 등). 파일이 없어도 동작함.
 [ -f "$HERE/config.env" ] && set -a && . "$HERE/config.env" && set +a
-export PATH="$HOME/.local/bin:$HOME/workspace/muse-ultra-browser-build/shim:$PATH"
-# Chromium 지정: CHROME_PATH가 이미 있으면 존중, 없으면 playwright 캐시→shim 순으로 탐색
+export PATH="$HOME/.local/bin:$PATH"
 if [ -z "${CHROME_PATH:-}" ]; then
   PW=$(ls ~/.cache/ms-playwright/chromium-*/chrome-linux*/chrome 2>/dev/null | head -1 || true)
   if [ -n "$PW" ]; then export CHROME_PATH="$PW";
-  else export CHROME_PATH=/opt/meta-chromium/chrome; fi  # 주의: meta-chromium은 단독 실행 불가(README 참조)
+  else export CHROME_PATH=/opt/meta-chromium/chrome; fi  # note: meta-chromium cannot run standalone (see README)
 fi
 export MUSE_ULTRA_HEADLESS="${MUSE_ULTRA_HEADLESS:-1}"
 MUSE_ULTRA_TIMEOUT=60
+STATE="$HERE/.chain-state"
+mkdir -p "$STATE"
 
-# 콜드 스타트 레이스 방지 (2026-11-20): 데몬이 꺼진 상태에서 첫 호출이
-# ENOENT daemon.sock 으로 실패하던 문제. 소켓이 없으면 status로 데몬을
-# 먼저 깨우고 소켓 준비를 기다린다. 그래도 실패하면 호출부에서 1회 재시도.
-DAEMON_SOCK="$HOME/.local/share/muse-ultra-browser/daemon.sock"
-ensure_daemon() {
-  [ -S "$DAEMON_SOCK" ] && return 0
-  timeout 15 muse-ultra-browser status >/dev/null 2>&1 || true
-  for _ in $(seq 1 40); do
-    [ -S "$DAEMON_SOCK" ] && return 0
-    sleep 0.25
-  done
-  return 0
-}
-ensure_daemon
-
-if [ "${1:-}" = "warm" ]; then
-  # 데몬 웜 유지 (2026-11-21): 데몬+Chromium을 미리 띄우고 빈 페이지로 예열한다.
-  # 데몬(muse-ultra-browser.mjs serve)은 유휴 종료가 없다 — 종료 조건은 muse-ultra-browser stop,
-  # Chromium 크래시(데몬 동반 종료 후 다음 호출에서 재생성), VM 재부팅뿐이다.
-  # 그래서 웜 유지는 "한 번 띄워 두기"로 충분하고 별도 keepalive가 필요 없다.
-  TMPJS=$(mktemp /tmp/meta-muse-ultra-XXXXXX.js)
-  RAW=$(mktemp /tmp/meta-muse-ultra-raw-XXXXXX.txt)
-  cat > "$TMPJS" <<'EOF'
-const t = await taskSpace("warm" + Date.now());
-const p = await t.newPage();
-await p.goto("about:blank");
-console.log("warm ok");
-await t.finish({keep: []});
-EOF
-  RC=0
-  timeout $MUSE_ULTRA_TIMEOUT muse-ultra-browser < "$TMPJS" > "$RAW" 2>&1 || RC=$?
-  if [ $RC -ne 0 ] && grep -q 'daemon\.sock' "$RAW" 2>/dev/null; then
-    # 콜드 레이스: 데몬 소켓이 늦게 뜨면 1회만 재시도 (open/read와 동일 패턴)
-    ensure_daemon
-    RC=0
-    timeout $MUSE_ULTRA_TIMEOUT muse-ultra-browser < "$TMPJS" > "$RAW" 2>&1 || RC=$?
+arm_idle() {
+  date +%s > "$STATE/last-used"
+  if [ -f "$STATE/watchdog.pid" ]; then
+    kill "$(cat "$STATE/watchdog.pid" 2>/dev/null)" 2>/dev/null || true
   fi
-  rm -f "$TMPJS"
-  cat "$RAW"; rm -f "$RAW"
-  if [ $RC -ne 0 ]; then echo "run.sh warm: muse-ultra-browser failed (rc=$RC)" >&2; exit $RC; fi
-  muse-ultra-browser status
-  exit 0
-fi
+  IDLE_STOP_SEC="${IDLE_STOP_SEC:-120}" nohup "$HERE/idle-stop.sh" >/dev/null 2>&1 &
+  echo $! > "$STATE/watchdog.pid"
+  disown 2>/dev/null || true
+}
+
+case "${1:-}" in
+  keep)  touch "$STATE/keep"; echo "idle auto-stop OFF (daemon will stay up)"; exit 0 ;;
+  resume) rm -f "$STATE/keep"; arm_idle; echo "idle auto-stop ON (${IDLE_STOP_SEC:-120}s)"; exit 0 ;;
+  stop)  muse-ultra-browser stop 2>/dev/null || true; "$HERE/stop-relay.sh" || true
+         rm -f "$STATE/watchdog.pid"; exit 0 ;;
+  status) exec muse-ultra-browser status ;;
+esac
+
+START=$(date +%s.%N)
+elapsed() { awk -v s="$START" -v e="$(date +%s.%N)" 'BEGIN{printf "%.1f", e-s}'; }
+result_line() { # mode status code chars via
+  echo "%%CHAIN%% lane=L1 mode=$1 status=$2 code=$3 elapsed_s=$(elapsed) chars=$4 via=$5"
+}
+detect_code() { # file -> prints F-IP|F-BOT|- based on block markers
+  if grep -qiE 'attention required|sorry, you have been blocked|access denied|접속이 일시적으로 제한|접속이 제한되었습니다|비정상적인 접근이 감지' "$1"; then echo F-IP;
+  elif grep -qiE 'verify you are human|are you a robot|unusual traffic from your computer' "$1"; then echo F-BOT;
+  else echo -; fi
+}
 
 if [ "${1:-}" = "open" ] || [ "${1:-}" = "read" ]; then
-  MODE=$1; URL=${2:?usage: run.sh open|read <url>}
-  if [ "$MODE" = "read" ]; then SNAPCALL='await p.snapshot({scope: "full_page"})'; TRIM=text
-  else SNAPCALL='await p.snapshot()'; TRIM=trim; fi
+  MODE=$1; shift
+  LEAN=0; FP=0
+  while [ "${1:-}" = "--lean" ] || [ "${1:-}" = "--fp" ]; do
+    [ "$1" = "--lean" ] && LEAN=1
+    [ "$1" = "--fp" ] && { FP=1; LEAN=1; }
+    shift
+  done
+  [ "${UB_LEAN:-}" = "1" ] && LEAN=1
+  [ "${UB_FP:-}" = "1" ] && { FP=1; LEAN=1; }
+  URL=${1:?usage: run.sh open|read [--lean] [--fp] <url>}
+  [ "$LEAN" = "1" ] && echo "run.sh: lean mode (Image/Font/Media requests blocked via CDP Fetch)" >&2
+  arm_idle
   URLJSON=$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$URL")
+  BASEJSON=$(python3 -c 'import json,sys; from urllib.parse import urlparse; h=(urlparse(sys.argv[1]).hostname or "").lower(); p=h.split("."); sl={"co","or","go","ac","ne","pe","re","hs","ms","es","sc","kg"}; n=3 if len(p)>=3 and p[-1]=="kr" and p[-2] in sl else 2; print(json.dumps(".".join(p[-n:]) if len(p)>=n else h))' "$URL")
+  HOSTSJSON=$(python3 -c 'import json,sys; from urllib.parse import urlparse; h=(urlparse(sys.argv[1]).hostname or "").lower(); bare=h[4:] if h.startswith("www.") else h; print(json.dumps(sorted({h, bare, "www."+bare})))' "$URL")
+  [ "$FP" = "1" ] && echo "run.sh: first-party strict mode (only exact hosts $HOSTSJSON continue; subdomains and all third-party hosts blocked via CDP Fetch)" >&2
+  # Navigation block injected into the generated script. Normal mode: the
+  # existing p.goto line, unchanged. Lean mode: Fetch-enable + Page.navigate
+  # (a short CDP call) + an event pump. The pump cannot run concurrently with
+  # p.goto: the bridge gate serializes per-space operations, so p.events()
+  # would block until goto returns — measured: all paused requests drained in
+  # one batch only after goto's 15s load timeout. Short calls interleave fine.
+  if [ "$LEAN" = "1" ]; then
+    NAVBLOCK=$(cat <<'LEANEOF'
+  try { await p.cdp('Fetch.enable', { patterns: [
+    { urlPattern: '*', resourceType: 'Image', requestStage: 'Request' },
+    { urlPattern: '*', resourceType: 'Font', requestStage: 'Request' },
+    { urlPattern: '*', resourceType: 'Media', requestStage: 'Request' }
+  ] }); } catch (e) {}
+  try { await p.cdp('Page.navigate', { url: __URLJSON__ }); } catch (e) { /* snapshot anyway */ }
+  {
+    const leanStart = Date.now();
+    const leanDeadline = leanStart + 45000;
+    let lastPausedAt = Date.now();
+    while (Date.now() < leanDeadline) {
+      let paused = 0;
+      try {
+        const evs = await p.events();
+        for (const e of evs) {
+          if (e && e.method === 'Fetch.requestPaused' && e.params && e.params.requestId) {
+            paused++;
+            try { await p.cdp('Fetch.failRequest', { requestId: e.params.requestId, errorReason: 'BlockedByClient' }); } catch (err) {}
+          }
+        }
+      } catch (e) {}
+      if (paused > 0) lastPausedAt = Date.now();
+      let rs = '', href = '';
+      try { rs = await p.evaluate(() => document.readyState); } catch (e) {}
+      try { href = await p.evaluate(() => location.href); } catch (e) {}
+      if (Date.now() - leanStart > 1000 && href && href !== 'about:blank' && rs === 'complete' && Date.now() - lastPausedAt > 400) break;
+      await new Promise(r => setTimeout(r, 40));
+    }
+  }
+  try { await p.cdp('Fetch.disable'); } catch (e) {}
+LEANEOF
+)
+    NAVBLOCK=${NAVBLOCK/__URLJSON__/$URLJSON}
+    if [ "$FP" = "1" ]; then
+      # First-party variant: intercept EVERY resource type. Continue only
+      # requests whose host is the target's registrable domain (or a
+      # subdomain of it); fail all third-party hosts before they leave the
+      # browser, so no connection to them is ever attempted. Image/Font/
+      # Media still fail even when first-party (lean behaviour).
+      NAVBLOCK=$(cat <<'FPEOF'
+  const FP_HOSTS = __HOSTSJSON__;
+  const fpAllow = (u) => { try { const h = new URL(u).hostname.toLowerCase(); return FP_HOSTS.includes(h); } catch (e) { return true; } };
+  try { await p.cdp('Fetch.enable', { patterns: [
+    'Document','Stylesheet','Image','Media','Font','Script','TextTrack','XHR','Fetch','EventSource','WebSocket','Manifest','Ping','Preflight','Other'
+  ].map(rt => ({ urlPattern: '*', resourceType: rt, requestStage: 'Request' })) }); } catch (e) {}
+  try { await p.cdp('Page.navigate', { url: __URLJSON__ }); } catch (e) { /* snapshot anyway */ }
+  {
+    const leanStart = Date.now();
+    const leanDeadline = leanStart + 45000;
+    let lastPausedAt = Date.now();
+    while (Date.now() < leanDeadline) {
+      let paused = 0;
+      try {
+        const evs = await p.events();
+        for (const e of evs) {
+          if (e && e.method === 'Fetch.requestPaused' && e.params && e.params.requestId) {
+            paused++;
+            const rt = e.params.resourceType || '';
+            const u = (e.params.request && e.params.request.url) || '';
+            try {
+              if (rt === 'Image' || rt === 'Font' || rt === 'Media' || !fpAllow(u)) {
+                await p.cdp('Fetch.failRequest', { requestId: e.params.requestId, errorReason: 'BlockedByClient' });
+              } else {
+                await p.cdp('Fetch.continueRequest', { requestId: e.params.requestId });
+              }
+            } catch (err) {}
+          }
+        }
+      } catch (e) {}
+      if (paused > 0) lastPausedAt = Date.now();
+      let rs = '', href = '';
+      try { rs = await p.evaluate(() => document.readyState); } catch (e) {}
+      try { href = await p.evaluate(() => location.href); } catch (e) {}
+      if (Date.now() - leanStart > 1000 && href && href !== 'about:blank' && rs === 'complete' && Date.now() - lastPausedAt > 400) break;
+      await new Promise(r => setTimeout(r, 40));
+    }
+  }
+  // NOTE: Fetch interception intentionally stays ARMED after the pump.
+  // Extraction runs next, then the page is closed by taskSpace finish.
+  // Any late request the page fires in between stays paused forever and
+  // never leaves the browser — disabling Fetch here leaked delayed
+  // third-party beacons out (measured 2026-11-24: taboola/dable/criteo
+  // hosts carded seconds after the read finished).
+FPEOF
+)
+      NAVBLOCK=${NAVBLOCK/__URLJSON__/$URLJSON}
+      NAVBLOCK=${NAVBLOCK/__HOSTSJSON__/$HOSTSJSON}
+    fi
+    # Lean extraction replaces the bridge snapshot: p.snapshot hangs after a
+    # Fetch-paused navigation (the bridge's navigation bookkeeping never
+    # settles — measured across goto load/domcontentloaded/commit and raw
+    # Page.navigate variants). Raw evaluate/CDP extraction works fine.
+    if [ "$MODE" = "read" ]; then
+      LOGCALL="console.log(await p.evaluate(() => { const b = document.body; if (!b) return ''; return b.innerText || b.textContent || ''; }));"
+    else
+      LOGCALL=$(cat <<'OUTEOF'
+console.log(await p.evaluate(() => {
+  const out = [];
+  out.push('title: ' + document.title);
+  out.push('url: ' + location.href);
+  const els = document.querySelectorAll('h1,h2,h3,h4,a[href],button,input,select,textarea,[role="button"]');
+  let n = 0;
+  for (const el of els) {
+    if (n >= 400) { out.push('... (outline truncated at 400 entries)'); break; }
+    const tag = el.tagName.toLowerCase();
+    const label = (el.innerText || el.value || el.getAttribute('aria-label') || el.getAttribute('placeholder') || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+    if (tag === 'a') { out.push('link "' + label + '" -> ' + el.getAttribute('href')); n++; }
+    else if (tag === 'input' || tag === 'select' || tag === 'textarea') { out.push(tag + ' [name=' + (el.getAttribute('name') || '') + '] "' + label + '"'); n++; }
+    else if (tag === 'button' || el.getAttribute('role') === 'button') { out.push('button "' + label + '"'); n++; }
+    else { out.push(tag + ' "' + label + '"'); n++; }
+  }
+  return out.join('\n');
+}));
+OUTEOF
+)
+    fi
+  else
+    NAVBLOCK="  try { await p.goto($URLJSON); } catch (e) { /* navigation committed — snapshot anyway */ }"
+  fi
   TMPJS=$(mktemp /tmp/meta-muse-ultra-XXXXXX.js)
   RAW=$(mktemp /tmp/meta-muse-ultra-raw-XXXXXX.txt)
-  cat > "$TMPJS" <<EOF
+  OUT=$(mktemp /tmp/meta-muse-ultra-out-XXXXXX.txt)
+  trap 'rm -f "$TMPJS" "$RAW" "$OUT"' EXIT
+
+  run_attempt() { # snapcall trimmode -> fills $OUT, returns museUltra rc
+    local snapcall="$1" trim="$2"
+    local logline="console.log($snapcall);"
+    [ "$LEAN" = "1" ] && logline="$LOGCALL"
+    cat > "$TMPJS" <<EOF
 let t;
 try {
   t = await taskSpace("ub" + Date.now());
@@ -88,51 +229,82 @@ try {
       fullVersion: '159.0.8154.6',
       platform: 'Linux', platformVersion: '', architecture: 'x86', model: '', mobile: false, bitness: '64', wow64: false
     }
-  }); } catch (e) { /* 실패해도 래퍼 플래그 UA와 프로필 언어 pref가 기본값을 보장 */ }
-  try { await p.goto($URLJSON); } catch (e) { /* navigation committed — 스냅샷은 그대로 시도 */ }
-  console.log($SNAPCALL);
+  }); } catch (e) { /* wrapper flags + profile prefs still guarantee defaults */ }
+$NAVBLOCK
+  $logline
 } finally {
   if (t) { try { await t.finish({keep: []}); } catch (e) {} }
 }
 EOF
-  RC=0
-  timeout $MUSE_ULTRA_TIMEOUT muse-ultra-browser < "$TMPJS" > "$RAW" || RC=$?
-  if [ $RC -ne 0 ] && grep -q 'daemon\.sock' "$RAW" 2>/dev/null; then
-    # 소켓 레이스 잔여 케이스: 데몬을 다시 깨우고 1회만 재시도
-    ensure_daemon
-    RC=0
-    timeout $MUSE_ULTRA_TIMEOUT muse-ultra-browser < "$TMPJS" > "$RAW" || RC=$?
+    local rc=0
+    timeout $MUSE_ULTRA_TIMEOUT muse-ultra-browser < "$TMPJS" > "$RAW" || rc=$?
+    if [ $rc -ne 0 ] && grep -q 'daemon\.sock' "$RAW" 2>/dev/null; then
+      # residual socket race: retry exactly once
+      rc=0
+      timeout $MUSE_ULTRA_TIMEOUT muse-ultra-browser < "$TMPJS" > "$RAW" || rc=$?
+    fi
+    if [ $rc -eq 0 ]; then
+      if [ "$LEAN" = "1" ]; then cp "$RAW" "$OUT";
+      else python3 "$HERE/snaptrim.py" "$trim" < "$RAW" > "$OUT" || cp "$RAW" "$OUT"; fi
+    fi
+    return $rc
+  }
+
+  VIA=-
+  if [ "$MODE" = "read" ]; then
+    RC=0; run_attempt 'await p.snapshot({scope: "full_page"})' text || RC=$?
+    VIA=full
+    [ "$LEAN" = "1" ] && VIA=lean
+    CHARS=0; [ $RC -eq 0 ] && CHARS=$(wc -m < "$OUT")
+    if [ "$LEAN" != "1" ] && { [ $RC -ne 0 ] || [ "$CHARS" -lt 100 ]; }; then
+      # same-lane different attempt: viewport snapshot (giant pages time out on full_page)
+      RC2=0; run_attempt 'await p.snapshot()' text || RC2=$?
+      CHARS2=0; [ $RC2 -eq 0 ] && CHARS2=$(wc -m < "$OUT")
+      if [ $RC2 -eq 0 ] && [ "$CHARS2" -ge "$CHARS" ]; then RC=$RC2; CHARS=$CHARS2; VIA=viewport; fi
+    fi
+  else
+    RC=0; run_attempt 'await p.snapshot()' trim || RC=$?
+    [ "$LEAN" = "1" ] && VIA=lean
+    CHARS=0; [ $RC -eq 0 ] && CHARS=$(wc -m < "$OUT")
   fi
-  rm -f "$TMPJS"
+
+  # Agent-first output contract: success -> body + result line, exit 0.
+  # Failure -> result line ONLY (no body: block pages/empty shells are wasted
+  # tokens), exit 1. UB_DEBUG=1 sends the failed body to stderr for diagnosis.
   if [ $RC -ne 0 ]; then
-    echo "run.sh $MODE: muse-ultra-browser failed (rc=$RC, timeout=${MUSE_ULTRA_TIMEOUT}s)" >&2
-    cat "$RAW" >&2; rm -f "$RAW"; exit $RC
+    if [ $RC -eq 124 ]; then CODE=F-TIMEOUT; else CODE=F-NET; fi
+    head -30 "$RAW" >&2
+    result_line "$MODE" fail "$CODE" 0 "$VIA"
+    exit 1
   fi
-  python3 "$HERE/snaptrim.py" $TRIM < "$RAW"
-  rm -f "$RAW"
+  CODE=$(detect_code "$OUT")
+  if [ "$CODE" != "-" ]; then
+    [ "${UB_DEBUG:-}" = "1" ] && cat "$OUT" >&2
+    result_line "$MODE" fail "$CODE" "$CHARS" "$VIA"; exit 1
+  fi
+  if [ "$MODE" = "read" ] && [ "$CHARS" -lt 100 ]; then
+    [ "${UB_DEBUG:-}" = "1" ] && cat "$OUT" >&2
+    result_line "$MODE" fail F-EMPTY "$CHARS" "$VIA"; exit 1
+  fi
+  cat "$OUT"
+  printf '\n'  # keep the result line at a line start for parsers
+  result_line "$MODE" ok - "$CHARS" "$VIA"
   exit 0
 fi
 
+arm_idle
 if [ "${1:-}" = "-f" ]; then
-  # 원샷 실행 경로 (2026-11-21): 콜드 스타트 소켓 레이스 때만 1회 재시도한다.
-  RAW=$(mktemp /tmp/meta-muse-ultra-raw-XXXXXX.txt)
-  RC=0
-  timeout $MUSE_ULTRA_TIMEOUT muse-ultra-browser < "$2" > "$RAW" 2>&1 || RC=$?
-  if [ $RC -ne 0 ] && grep -q 'daemon\.sock' "$RAW" 2>/dev/null; then
-    ensure_daemon
-    RC=0
-    timeout $MUSE_ULTRA_TIMEOUT muse-ultra-browser < "$2" > "$RAW" 2>&1 || RC=$?
-  fi
-  cat "$RAW"; rm -f "$RAW"
-  exit $RC
+  RC=0; timeout $MUSE_ULTRA_TIMEOUT muse-ultra-browser < "$2" || RC=$?
+  result_line js "$([ $RC -eq 0 ] && echo ok || echo fail)" "$([ $RC -eq 124 ] && echo F-TIMEOUT || echo -)" 0 -
+  [ $RC -eq 0 ] && exit 0 || exit 1
 fi
 if [ -n "${1:-}" ]; then
-  # 주의: printf 파이프로 넘기면 muse-ultra-browser가 종료되지 않는 현상이 있어 파일 리다이렉트 사용
+  # file redirect input (piped stdin makes the muse-ultra-browser client hang)
   TMPJS=$(mktemp /tmp/meta-muse-ultra-XXXXXX.js)
   printf '%s\n' "$1" > "$TMPJS"
-  RC=0
-  timeout $MUSE_ULTRA_TIMEOUT muse-ultra-browser < "$TMPJS" || RC=$?
+  RC=0; timeout $MUSE_ULTRA_TIMEOUT muse-ultra-browser < "$TMPJS" || RC=$?
   rm -f "$TMPJS"
-  exit $RC
+  result_line js "$([ $RC -eq 0 ] && echo ok || echo fail)" "$([ $RC -eq 124 ] && echo F-TIMEOUT || echo -)" 0 -
+  [ $RC -eq 0 ] && exit 0 || exit 1
 fi
 exec timeout $MUSE_ULTRA_TIMEOUT muse-ultra-browser
