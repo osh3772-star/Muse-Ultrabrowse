@@ -28,7 +28,7 @@
 
 | # | 레인 | 스킬/호출 | 출구 IP | 프로필 |
 |---|------|----------|---------|--------|
-| L1 | UltraBrowse | `ultrabrowse` 스킬 (`~/workspace/ego-linux-build/meta-ego/run.sh`) | VM 데이터센터 | VM 전용 |
+| L1 | UltraBrowse | `ultrabrowse` 스킬 (`~/workspace/muse-ultra-browser-build/meta-muse-ultra/run.sh`) | VM 데이터센터 | VM 전용 |
 | L2 | 클라우드 브라우저 | Muse 브라우저 | Muse 측 | Muse 프로필 |
 
 ## 1단계 — 작업 분류 (진입점에서 1회만 판정)
