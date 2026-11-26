@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # meta-muse-ultra idle-stop watchdog: armed by run.sh on every L1 call.
-# Sleeps IDLE_STOP_SEC, then stops daemon+relay only if no newer call
+# Sleeps IDLE_STOP_SEC, then stops the daemon only if no newer call
 # refreshed .chain-state/last-used and keep mode is off.
+# The shared socat relay is intentionally left running: it serves other
+# instances/tools too, and stops only via an explicit stop-relay.sh run
+# (changed 2026-11-26 — idle-stop used to take the relay down with it).
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE="$HERE/.chain-state"
@@ -15,6 +18,5 @@ NOW=$(date +%s)
 AGE=$(( NOW - ${LAST:-0} ))
 if [ "$AGE" -ge "$(( IDLE - 2 ))" ]; then
   node "$HERE/cdp-client.mjs" --stop >/dev/null 2>&1 || true
-  "$HERE/stop-relay.sh" >/dev/null 2>&1 || true
 fi
 exit 0

@@ -115,7 +115,10 @@ Runtime.evaluate와 교착한다 (상세: `~/workspace/ultra-harness-2026-11-26.
   **다단계 작업이면 시작 시 `$META/run.sh warm`으로 선기동**하거나 아예
   `run.sh batch`로 묶어라 — 콜드 첫 호출의 소켓 경합(ECONNREFUSED)은 run_client가
   1회 재시도로 흡수한다 (2026-11-26 수정: 기존 재시도는 stdout만 grep해 발동 불가였음).
-- idle 600초 무호출이면 데몬+릴레이 자동 정지. 긴 연속 작업이면 시작할 때 `$META/run.sh keep`,
+- idle 600초 무호출이면 데몬 자동 정지. **공유 릴레이(:18080)는 건드리지 않는다** —
+  `run.sh stop`·idle-stop은 자기 데몬만 내리고, 릴레이 종료는 `stop-relay.sh` 명시
+  실행으로만 한다 (2026-11-26 수정: stop이 릴레이까지 내려 다른 인스턴스의 출구를
+  같이 끊던 문제). 긴 연속 작업이면 시작할 때 `$META/run.sh keep`,
   끝나면 `$META/run.sh stop`.
 - **세션 영속 (2026-11-24 변경)**: 작업 공간이 프로필의 기본 컨텍스트를 써서 쿠키·localStorage·
   IndexedDB가 프로필 디렉터리에 저장된다. 공간을 닫거나 데몬이 내려가도(완전 재시작 포함)

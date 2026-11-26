@@ -11,7 +11,8 @@
 #   run.sh -f script.js  — JS file
 #   run.sh keep          — disable idle auto-stop (daemon stays up)
 #   run.sh resume        — re-enable idle auto-stop
-#   run.sh stop          — stop daemon + relay now
+#   run.sh stop          — stop daemon now (shared relay stays up;
+#                          stop-relay.sh stops it, explicitly only)
 #   run.sh status        — daemon status
 #   run.sh warm          — pre-start the daemon (skip cold start on next call)
 #   run.sh batch <file>  — run several steps from a file in this one process
@@ -70,7 +71,11 @@ arm_idle() {
 case "${1:-}" in
   keep)  touch "$STATE/keep"; echo "idle auto-stop OFF (daemon will stay up)"; exit 0 ;;
   resume) rm -f "$STATE/keep"; arm_idle; echo "idle auto-stop ON (${IDLE_STOP_SEC:-600}s)"; exit 0 ;;
-  stop)  node "$HERE/cdp-client.mjs" --stop 2>/dev/null || true; "$HERE/stop-relay.sh" || true
+  stop)  # Daemon only. The socat relay (:$UB_RELAY_PORT) is shared with other
+         # instances/tools — stopping it here took their egress down too
+         # (found 2026-11-26, doctor clean-install test). The relay stops
+         # only via an explicit stop-relay.sh run.
+         node "$HERE/cdp-client.mjs" --stop 2>/dev/null || true
          rm -f "$STATE/watchdog.pid"; exit 0 ;;
   status) exec node "$HERE/cdp-client.mjs" --status ;;
   warm)
