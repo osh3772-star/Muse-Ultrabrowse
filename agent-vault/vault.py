@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """agent-vault: encrypted credential store for agent use.
 
-Design rules (see skills/agent-vault/SKILL.md in this package):
+Design rules (see ~/workspace/custom-skills/agent-vault/SKILL.md):
 - Values are Fernet-encrypted at rest; the key file lives separately
   from the encrypted entries.
 - Values enter ONLY via stdin or a file the user placed themselves.

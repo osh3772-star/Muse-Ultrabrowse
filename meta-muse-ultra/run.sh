@@ -13,11 +13,19 @@
 #   run.sh resume        — re-enable idle auto-stop
 #   run.sh stop          — stop daemon + relay now
 #   run.sh status        — daemon status
+#   run.sh warm          — pre-start the daemon (skip cold start on next call)
+#   run.sh batch <file>  — run several steps from a file in this one process
+#                          (see batch.sh; one exec, daemon started once)
 # open/read/js print a final structured line:
 #   %%CHAIN%% lane=L1 mode=<m> status=ok|fail code=<F-*|-> elapsed_s=<n> chars=<n> via=<full|viewport|->
 # The launcher auto-starts its daemon on the first real call; do NOT pre-wait
 # for the socket (the old ensure_daemon loop burned ~10s waiting for a socket
 # that `muse-ultra-browser status` never creates — measured: direct cold 6.4s vs 19.9s).
+# HARNESS (2026-11-26): the client is now cdp-client.mjs + cdp-daemon.mjs, a
+# raw-CDP daemon in this directory — the ego-generation harness delivered the
+# first Fetch.requestPaused event ~15s after navigation (measured on both the
+# stock launcher and the ego-linux fork); raw CDP delivers it in ~80ms.
+# See ~/workspace/ultra-harness-2026-11-26.md. Rollback: backup-harness-2026-11-26/.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [ -f "$HERE/config.env" ] && set -a && . "$HERE/config.env" && set +a
@@ -37,17 +45,37 @@ arm_idle() {
   if [ -f "$STATE/watchdog.pid" ]; then
     kill "$(cat "$STATE/watchdog.pid" 2>/dev/null)" 2>/dev/null || true
   fi
-  IDLE_STOP_SEC="${IDLE_STOP_SEC:-120}" nohup "$HERE/idle-stop.sh" >/dev/null 2>&1 &
+  IDLE_STOP_SEC="${IDLE_STOP_SEC:-600}" nohup "$HERE/idle-stop.sh" >/dev/null 2>&1 &
   echo $! > "$STATE/watchdog.pid"
   disown 2>/dev/null || true
 }
 
 case "${1:-}" in
   keep)  touch "$STATE/keep"; echo "idle auto-stop OFF (daemon will stay up)"; exit 0 ;;
-  resume) rm -f "$STATE/keep"; arm_idle; echo "idle auto-stop ON (${IDLE_STOP_SEC:-120}s)"; exit 0 ;;
-  stop)  muse-ultra-browser stop 2>/dev/null || true; "$HERE/stop-relay.sh" || true
+  resume) rm -f "$STATE/keep"; arm_idle; echo "idle auto-stop ON (${IDLE_STOP_SEC:-600}s)"; exit 0 ;;
+  stop)  node "$HERE/cdp-client.mjs" --stop 2>/dev/null || true; "$HERE/stop-relay.sh" || true
          rm -f "$STATE/watchdog.pid"; exit 0 ;;
-  status) exec muse-ultra-browser status ;;
+  status) exec node "$HERE/cdp-client.mjs" --status ;;
+  warm)
+    # Pre-start the daemon so the next real call skips the cold start.
+    # Self-contained retry: the first client call can hit ECONNREFUSED on the
+    # daemon socket while the daemon is still coming up (error text is on
+    # stderr, not stdout — measured 2026-11-26).
+    arm_idle
+    WARMJS=$(mktemp /tmp/meta-muse-ultra-warm-XXXXXX.js)
+    WARMERR=$(mktemp /tmp/meta-muse-ultra-warmerr-XXXXXX.txt)
+    printf 'const t = await taskSpace("ub-warm");\nconst p = await t.newPage();\nawait t.finish({keep: []});\nconsole.log("ub-warm");\n' > "$WARMJS"
+    WRC=0
+    timeout 30 node "$HERE/cdp-client.mjs" < "$WARMJS" 2> "$WARMERR" || WRC=$?
+    if [ $WRC -ne 0 ] && grep -qiE 'daemon\.sock|ECONNREFUSED' "$WARMERR" 2>/dev/null; then
+      sleep 1; WRC=0
+      timeout 30 node "$HERE/cdp-client.mjs" < "$WARMJS" 2> "$WARMERR" || WRC=$?
+    fi
+    [ -s "$WARMERR" ] && cat "$WARMERR" >&2
+    rm -f "$WARMJS" "$WARMERR"
+    if [ $WRC -eq 0 ]; then echo "daemon warm"; else echo "warm failed rc=$WRC" >&2; exit 1; fi
+    exit 0 ;;
+  batch) shift; exec "$HERE/batch.sh" "$@" ;;
 esac
 
 START=$(date +%s.%N)
@@ -59,6 +87,24 @@ detect_code() { # file -> prints F-IP|F-BOT|- based on block markers
   if grep -qiE 'attention required|sorry, you have been blocked|access denied|접속이 일시적으로 제한|접속이 제한되었습니다|비정상적인 접근이 감지' "$1"; then echo F-IP;
   elif grep -qiE 'verify you are human|are you a robot|unusual traffic from your computer' "$1"; then echo F-BOT;
   else echo -; fi
+}
+
+run_client() { # script-file -> runs the muse-ultra-browser client once, retrying
+  # exactly once when the daemon socket race hits (ECONNREFUSED while the daemon
+  # is still starting). The client prints that error on STDERR — the pre-2026-11-26
+  # retry grepped stdout only and never fired (measured: cold call F-NET in 5.6s).
+  # Client stderr is captured to a temp file and replayed to our stderr.
+  local infile="$1" errf rc=0
+  errf=$(mktemp /tmp/meta-muse-ultra-err-XXXXXX.txt)
+  timeout $MUSE_ULTRA_TIMEOUT node "$HERE/cdp-client.mjs" < "$infile" 2> "$errf" || rc=$?
+  if [ $rc -ne 0 ] && grep -qiE 'daemon\.sock|ECONNREFUSED' "$errf" 2>/dev/null; then
+    sleep 1
+    rc=0
+    timeout $MUSE_ULTRA_TIMEOUT node "$HERE/cdp-client.mjs" < "$infile" 2> "$errf" || rc=$?
+  fi
+  [ -s "$errf" ] && cat "$errf" >&2
+  rm -f "$errf"
+  return $rc
 }
 
 if [ "${1:-}" = "open" ] || [ "${1:-}" = "read" ]; then
@@ -79,96 +125,98 @@ if [ "${1:-}" = "open" ] || [ "${1:-}" = "read" ]; then
   HOSTSJSON=$(python3 -c 'import json,sys; from urllib.parse import urlparse; h=(urlparse(sys.argv[1]).hostname or "").lower(); bare=h[4:] if h.startswith("www.") else h; print(json.dumps(sorted({h, bare, "www."+bare})))' "$URL")
   [ "$FP" = "1" ] && echo "run.sh: first-party strict mode (only exact hosts $HOSTSJSON continue; subdomains and all third-party hosts blocked via CDP Fetch)" >&2
   # Navigation block injected into the generated script. Normal mode: the
-  # existing p.goto line, unchanged. Lean mode: Fetch-enable + Page.navigate
-  # (a short CDP call) + an event pump. The pump cannot run concurrently with
-  # p.goto: the bridge gate serializes per-space operations, so p.events()
-  # would block until goto returns — measured: all paused requests drained in
-  # one batch only after goto's 15s load timeout. Short calls interleave fine.
+  # existing p.goto line, unchanged. Lean/FP mode: Fetch.enable (bare
+  # pattern) + a daemon-side armed Fetch policy + fire-and-forget
+  # Page.navigate + a readyState settle poll. History: the pre-harness-swap
+  # pump answered paused requests from the script via p.events(), which
+  # only worked because the old harness delivered events ~15s late; over
+  # raw CDP that pattern deadlocks (see cdp-daemon.mjs armFetch note).
   if [ "$LEAN" = "1" ]; then
     NAVBLOCK=$(cat <<'LEANEOF'
-  try { await p.cdp('Fetch.enable', { patterns: [
-    { urlPattern: '*', resourceType: 'Image', requestStage: 'Request' },
-    { urlPattern: '*', resourceType: 'Font', requestStage: 'Request' },
-    { urlPattern: '*', resourceType: 'Media', requestStage: 'Request' }
-  ] }); } catch (e) {}
-  try { await p.cdp('Page.navigate', { url: __URLJSON__ }); } catch (e) { /* snapshot anyway */ }
+  // Bare Fetch pattern (no resourceType): Chrome 159's Fetch domain rejects
+  // several resourceType values in the filter list (TextTrack first) with
+  // "Unknown resource type in fetch filter" — a typed list either throws
+  // (17 types) or silently narrows coverage. The bare pattern pauses every
+  // request the Fetch domain can pause, incl. CORS preflights (which surface
+  // as XHR/OPTIONS). WebSocket handshakes are NOT paused by the Fetch domain
+  // at all (measured 2026-11-26) — a Chrome-level limit, same for any driver.
+  try { await p.cdp('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] }); } catch (e) {}
+  // Paused requests are answered daemon-side by the armed policy the instant
+  // they arrive. Answering from this script via events()+cdp() deadlocks:
+  // the pump's Runtime.evaluate is queued until the navigation commits, and
+  // the commit waits for the Fetch answer (measured 2026-11-26).
+  let leanLastPausedAt = Date.now();
+  let leanPausedTotal = 0;
+  p.armFetch(({ resourceType }) => {
+    leanPausedTotal++; leanLastPausedAt = Date.now();
+    return (resourceType === 'Image' || resourceType === 'Font' || resourceType === 'Media') ? 'fail' : 'continue';
+  }, 'continue');
+  // Fire-and-forget navigate; the settle poll below watches readyState/href.
+  p.cdp('Page.navigate', { url: __URLJSON__ }).catch(() => {});
   {
-    const leanStart = Date.now();
-    const leanDeadline = leanStart + 45000;
-    let lastPausedAt = Date.now();
-    while (Date.now() < leanDeadline) {
-      let paused = 0;
-      try {
-        const evs = await p.events();
-        for (const e of evs) {
-          if (e && e.method === 'Fetch.requestPaused' && e.params && e.params.requestId) {
-            paused++;
-            try { await p.cdp('Fetch.failRequest', { requestId: e.params.requestId, errorReason: 'BlockedByClient' }); } catch (err) {}
-          }
-        }
-      } catch (e) {}
-      if (paused > 0) lastPausedAt = Date.now();
-      let rs = '', href = '';
-      try { rs = await p.evaluate(() => document.readyState); } catch (e) {}
-      try { href = await p.evaluate(() => location.href); } catch (e) {}
-      if (Date.now() - leanStart > 1000 && href && href !== 'about:blank' && rs === 'complete' && Date.now() - lastPausedAt > 400) break;
-      await new Promise(r => setTimeout(r, 40));
+    const pumpStart = Date.now();
+    const pumpDeadline = pumpStart + 45000;
+    let sawNav = false;
+    while (Date.now() < pumpDeadline) {
+      let st = null;
+      try { st = await p.evaluate(() => ({ rs: document.readyState, href: location.href })); } catch (e) {}
+      if (st && st.href && st.href !== 'about:blank') sawNav = true;
+      if (sawNav && st && st.rs === 'complete' && Date.now() - leanLastPausedAt > 400 && Date.now() - pumpStart > 1000) break;
+      if (!sawNav && leanPausedTotal === 0 && Date.now() - pumpStart > 8000) break; // navigation never started
+      await new Promise(r => setTimeout(r, 100));
     }
   }
+  p.disarmFetch();
   try { await p.cdp('Fetch.disable'); } catch (e) {}
 LEANEOF
 )
     NAVBLOCK=${NAVBLOCK/__URLJSON__/$URLJSON}
     if [ "$FP" = "1" ]; then
-      # First-party variant: intercept EVERY resource type. Continue only
-      # requests whose host is the target's registrable domain (or a
-      # subdomain of it); fail all third-party hosts before they leave the
-      # browser, so no connection to them is ever attempted. Image/Font/
-      # Media still fail even when first-party (lean behaviour).
+      # First-party variant: intercept every resource type the harness
+      # accepts. Continue only requests whose host EXACTLY matches the
+      # target host (or its www/bare variant, see HOSTSJSON) — subdomains
+      # are blocked too, they carded in the 2026-11-24 leak. Fail all other
+      # hosts before they leave the browser, so no connection to them is
+      # ever attempted. Image/Font/Media still fail even when first-party
+      # (lean behaviour).
       NAVBLOCK=$(cat <<'FPEOF'
   const FP_HOSTS = __HOSTSJSON__;
   const fpAllow = (u) => { try { const h = new URL(u).hostname.toLowerCase(); return FP_HOSTS.includes(h); } catch (e) { return true; } };
-  try { await p.cdp('Fetch.enable', { patterns: [
-    'Document','Stylesheet','Image','Media','Font','Script','TextTrack','XHR','Fetch','EventSource','WebSocket','Manifest','Ping','Preflight','Other'
-  ].map(rt => ({ urlPattern: '*', resourceType: rt, requestStage: 'Request' })) }); } catch (e) {}
-  try { await p.cdp('Page.navigate', { url: __URLJSON__ }); } catch (e) { /* snapshot anyway */ }
+  // Bare pattern (see the lean block for why typed lists are wrong on
+  // Chrome 159). Host policy unchanged: only the exact target host (or its
+  // www/bare variant) continues — subdomains fail too, they carded in the
+  // 2026-11-24 leak. Image/Font/Media fail even when first-party.
+  try { await p.cdp('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] }); } catch (e) {}
+  // Daemon-side armed policy answers each paused request the instant it
+  // arrives (script-side answering via events() deadlocks against the
+  // pump's Runtime.evaluate — measured 2026-11-26). The closure updates
+  // the settle-poll counters directly.
+  let fpLastPausedAt = Date.now();
+  let fpPausedTotal = 0;
+  p.armFetch(({ resourceType, url }) => {
+    fpPausedTotal++; fpLastPausedAt = Date.now();
+    return (resourceType === 'Image' || resourceType === 'Font' || resourceType === 'Media' || !fpAllow(url)) ? 'fail' : 'continue';
+  }, 'fail');
+  p.cdp('Page.navigate', { url: __URLJSON__ }).catch(() => {});
   {
-    const leanStart = Date.now();
-    const leanDeadline = leanStart + 45000;
-    let lastPausedAt = Date.now();
-    while (Date.now() < leanDeadline) {
-      let paused = 0;
-      try {
-        const evs = await p.events();
-        for (const e of evs) {
-          if (e && e.method === 'Fetch.requestPaused' && e.params && e.params.requestId) {
-            paused++;
-            const rt = e.params.resourceType || '';
-            const u = (e.params.request && e.params.request.url) || '';
-            try {
-              if (rt === 'Image' || rt === 'Font' || rt === 'Media' || !fpAllow(u)) {
-                await p.cdp('Fetch.failRequest', { requestId: e.params.requestId, errorReason: 'BlockedByClient' });
-              } else {
-                await p.cdp('Fetch.continueRequest', { requestId: e.params.requestId });
-              }
-            } catch (err) {}
-          }
-        }
-      } catch (e) {}
-      if (paused > 0) lastPausedAt = Date.now();
-      let rs = '', href = '';
-      try { rs = await p.evaluate(() => document.readyState); } catch (e) {}
-      try { href = await p.evaluate(() => location.href); } catch (e) {}
-      if (Date.now() - leanStart > 1000 && href && href !== 'about:blank' && rs === 'complete' && Date.now() - lastPausedAt > 400) break;
-      await new Promise(r => setTimeout(r, 40));
+    const pumpStart = Date.now();
+    const pumpDeadline = pumpStart + 45000;
+    let sawNav = false;
+    while (Date.now() < pumpDeadline) {
+      let st = null;
+      try { st = await p.evaluate(() => ({ rs: document.readyState, href: location.href })); } catch (e) {}
+      if (st && st.href && st.href !== 'about:blank') sawNav = true;
+      if (sawNav && st && st.rs === 'complete' && Date.now() - fpLastPausedAt > 400 && Date.now() - pumpStart > 1000) break;
+      if (!sawNav && fpPausedTotal === 0 && Date.now() - pumpStart > 8000) break; // navigation never started
+      await new Promise(r => setTimeout(r, 100));
     }
   }
-  // NOTE: Fetch interception intentionally stays ARMED after the pump.
-  // Extraction runs next, then the page is closed by taskSpace finish.
-  // Any late request the page fires in between stays paused forever and
-  // never leaves the browser — disabling Fetch here leaked delayed
-  // third-party beacons out (measured 2026-11-24: taboola/dable/criteo
-  // hosts carded seconds after the read finished).
+  // NOTE: Fetch interception + the armed policy intentionally STAY ACTIVE
+  // after the settle poll. Extraction runs next, then the page is closed by
+  // taskSpace finish. Any late request the page fires in between is failed
+  // by the policy and never leaves the browser — disabling Fetch here
+  // leaked delayed third-party beacons out (measured 2026-11-24: taboola/
+  // dable/criteo hosts carded seconds after the read finished).
 FPEOF
 )
       NAVBLOCK=${NAVBLOCK/__URLJSON__/$URLJSON}
@@ -237,12 +285,7 @@ $NAVBLOCK
 }
 EOF
     local rc=0
-    timeout $MUSE_ULTRA_TIMEOUT muse-ultra-browser < "$TMPJS" > "$RAW" || rc=$?
-    if [ $rc -ne 0 ] && grep -q 'daemon\.sock' "$RAW" 2>/dev/null; then
-      # residual socket race: retry exactly once
-      rc=0
-      timeout $MUSE_ULTRA_TIMEOUT muse-ultra-browser < "$TMPJS" > "$RAW" || rc=$?
-    fi
+    run_client "$TMPJS" > "$RAW" || rc=$?
     if [ $rc -eq 0 ]; then
       if [ "$LEAN" = "1" ]; then cp "$RAW" "$OUT";
       else python3 "$HERE/snaptrim.py" "$trim" < "$RAW" > "$OUT" || cp "$RAW" "$OUT"; fi
@@ -294,7 +337,7 @@ fi
 
 arm_idle
 if [ "${1:-}" = "-f" ]; then
-  RC=0; timeout $MUSE_ULTRA_TIMEOUT muse-ultra-browser < "$2" || RC=$?
+  RC=0; run_client "$2" || RC=$?
   result_line js "$([ $RC -eq 0 ] && echo ok || echo fail)" "$([ $RC -eq 124 ] && echo F-TIMEOUT || echo -)" 0 -
   [ $RC -eq 0 ] && exit 0 || exit 1
 fi
@@ -302,9 +345,9 @@ if [ -n "${1:-}" ]; then
   # file redirect input (piped stdin makes the muse-ultra-browser client hang)
   TMPJS=$(mktemp /tmp/meta-muse-ultra-XXXXXX.js)
   printf '%s\n' "$1" > "$TMPJS"
-  RC=0; timeout $MUSE_ULTRA_TIMEOUT muse-ultra-browser < "$TMPJS" || RC=$?
+  RC=0; run_client "$TMPJS" || RC=$?
   rm -f "$TMPJS"
   result_line js "$([ $RC -eq 0 ] && echo ok || echo fail)" "$([ $RC -eq 124 ] && echo F-TIMEOUT || echo -)" 0 -
   [ $RC -eq 0 ] && exit 0 || exit 1
 fi
-exec timeout $MUSE_ULTRA_TIMEOUT muse-ultra-browser
+exec timeout $MUSE_ULTRA_TIMEOUT node "$HERE/cdp-client.mjs"

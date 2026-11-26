@@ -5,7 +5,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE="$HERE/.chain-state"
-IDLE="${IDLE_STOP_SEC:-120}"
+IDLE="${IDLE_STOP_SEC:-600}"
 export PATH="$HOME/.local/bin:$PATH"
 sleep "$IDLE"
 [ -f "$STATE/keep" ] && exit 0
@@ -14,7 +14,7 @@ LAST=0
 NOW=$(date +%s)
 AGE=$(( NOW - ${LAST:-0} ))
 if [ "$AGE" -ge "$(( IDLE - 2 ))" ]; then
-  muse-ultra-browser stop >/dev/null 2>&1 || true
+  node "$HERE/cdp-client.mjs" --stop >/dev/null 2>&1 || true
   "$HERE/stop-relay.sh" >/dev/null 2>&1 || true
 fi
 exit 0

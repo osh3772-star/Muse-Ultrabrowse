@@ -18,7 +18,7 @@ description: Muse Ultra Browser (뮤즈 울트라브라우즈) — VM 로컬 브
 3. **세션 영속** — 작업 공간이 프로필의 기본 컨텍스트를 써서, 한 번 로그인하면 데몬이 재시작돼도(완전 재시작 포함) 로그인 상태가 유지된다. 단 작업 공간끼리 스토리지를 공유하므로 사이트별 격리는 없다.
 4. **로그인 자격증명은 agent-vault 절차로** — 로그인이 필요한 사이트는 별도 로컬 볼트(agent-vault)를 쓴다: 사용자가 파일로 값을 넣어주면 암호화해 저장하고 원본 파일은 파쇄하며, 에이전트는 값을 보지 못한다. **비밀번호를 채팅으로 보내지 말 것**도 이때 사용자에게 안내한다. 상세 절차는 agent-vault 스킬을 따른다.
 5. **차단되면 다음 출구로** — 한 경로가 차단·실패하면 멈춰서 보고만 하지 말고, 체인의 다음 출구로 전환해 계속 진행한다.
-6. **자원 사용** — 데몬은 호출이 없으면 idle 120초에 자동 정지한다. 구동 중 메모리는 데몬+Chrome 합쳐 1GB 남짓이다.
+6. **자원 사용** — 데몬은 호출이 없으면 idle 600초에 자동 정지한다 (2026-11-26에 120→600으로 변경: 에이전트가 단계 사이 생각하는 시간보다 짧으면 데몬이 죽어 콜드 스타트+카드가 반복됐다). 구동 중 메모리는 데몬+Chrome 합쳐 1GB 남짓이다.
 
 ## 차단 회피와 대응 (전 사이트 공통, 2026-11-24 사용자 지시로 반영)
 
@@ -38,9 +38,24 @@ $META/run.sh read <url>     # 본문 텍스트 (full_page; 실패 시 viewport 1
 $META/run.sh read --fp <url>  # 노카드 모드 (아래)
 $META/run.sh -f script.js   # 임의 JS (파일로만 — 파이프 입력은 hang)
 $META/fetch.sh <url>        # L0 단독 (브라우저 없음)
+$META/run.sh warm           # 데몬 선기동 (다단계 작업 시작 시 — 콜드 스타트·소켓 경합 회피)
+$META/run.sh batch steps.txt  # 여러 단계를 exec 1회로 실행 (아래 "배치" 절)
 ```
 
-**노카드 모드 `--fp` (2026-11-24 실측)**: exec 네트워크 승인은 호스트마다 카드가 뜨는데,
+**배치 (2026-11-26 신설)**: 다단계 작업(로그인 플로, 여러 페이지 연속 읽기 등)을
+단계마다 exec로 쪼개면 호출마다 데몬 재기동·신규 호스트 접속이 생겨 카드가 다시
+뜬다 (2026-11-26 직방 로그인에서 재발). steps 파일에 한 줄에 한 단계씩 적어
+`run.sh batch`로 한 번에 실행한다:
+```
+read --fp <url>
+read --lean <url>
+js <script.js>
+warm / keep / stop
+```
+단계별 출력 + `%%BATCH-STEP%%` 헤더, 마지막에 `%%BATCH%% steps=.. ok=.. fail=..`
+요약 줄이 나온다. 한 단계가 실패해도 나머지는 계속 실행된다.
+
+**노카드 모드 `--fp` (2026-11-24 실측, 2026-11-26 복구·재검증)**: exec 네트워크 승인은 호스트마다 카드가 뜨는데,
 페이지 본체가 아니라 광고·추적 서브리소스 호스트가 대부분이다. `--fp`는 CDP Fetch로
 전 요청을 가로채 ① 대상 호스트 정확 일치(www 유무 변형 포함)만 통과, 서브도메인 포함
 전부 차단 ② 추출이 끝나 페이지가 닫힐 때까지 차단을 유지(늦게 나가는 비콘 누수 방지)
@@ -48,6 +63,19 @@ $META/fetch.sh <url>        # L0 단독 (브라우저 없음)
 나오던 조건에서 **0장**, 본문 10,506자 정상. 광고·집계가 많은 페이지(뉴스 등)를
 exec로 읽을 때는 기본으로 `--fp`를 붙여라. 단, 본문이 서브도메인 JS에 의존하는
 페이지는 비어 보일 수 있으니 그때만 빼고 재시도한다.
+
+**⚠️ Fetch 패턴 규칙 (2026-11-26 하네스 교체로 갱신)**: 유형 거부
+(TextTrack 등 5종)의 출처는 하네스가 아니라 **Chrome 159의 Fetch 도메인 자체
+검증**이었다 — 유형을 열거한 패턴은 예외를 던지거나 커버리지가 좁아진다.
+정석은 **resourceType 없는 bare 패턴** `{urlPattern:'*', requestStage:'Request'}`
+하나로, Fetch가 일시정지할 수 있는 전 요청 + CORS 프리플라이트(XHR/OPTIONS로
+표면화)까지 잡는다. 단 **WebSocket 핸드셰이크는 Fetch로 못 막는다** (bare
+패턴에서도 실접속 실측) — WS로 제3자 호스트에 붙는 페이지는 카드 가능성이
+남는다. 그리고 일시정지 응답은 스크립트의 events() 펌프가 아니라 데몬측
+**`p.armFetch(policy, fallback)`** 으로 해야 한다 — events() 방식은
+Runtime.evaluate와 교착한다 (상세: `~/workspace/ultra-harness-2026-11-26.md`).
+재검증 (2026-11-26, 교체 후): YNA 기사 --fp read 4.7초·18,650자, 검증 구간
+전체 카드 **0장**.
 
 ## 출력 계약
 
@@ -57,8 +85,15 @@ exec로 읽을 때는 기본으로 `--fp`를 붙여라. 단, 본문이 서브도
 
 ## 운용 규칙
 
-- 콜드 ~5초 / 웜 ~2초. 데몬은 첫 호출이 자동 기동한다. **미리 깨우지 마라** (`status`는 안 깨운다).
-- idle 120초 무호출이면 데몬+릴레이 자동 정지. 연속 작업이면 시작할 때 `$META/run.sh keep`,
+- 콜드: warm(데몬+Chrome 선기동) 3.4초, YNA --fp 콜드 read 8.0초. 웜: YNA --fp
+  read 4.7초, 위키 lean 6.8초·--fp 5.1초, 배치 3단계 12.0초 (전부 2026-11-26
+  하네스 교체 후 실측 — 교체 전 YNA --fp 19.4초의 대부분이던 첫 requestPaused
+  ~15초 지연이 raw CDP에서 ~80ms로 사라진 결과). 데몬은 첫 호출이 자동
+  기동한다 (`status`는 안 깨운다). 단일 호출이면 미리 깨울 필요 없지만,
+  **다단계 작업이면 시작 시 `$META/run.sh warm`으로 선기동**하거나 아예
+  `run.sh batch`로 묶어라 — 콜드 첫 호출의 소켓 경합(ECONNREFUSED)은 run_client가
+  1회 재시도로 흡수한다 (2026-11-26 수정: 기존 재시도는 stdout만 grep해 발동 불가였음).
+- idle 600초 무호출이면 데몬+릴레이 자동 정지. 긴 연속 작업이면 시작할 때 `$META/run.sh keep`,
   끝나면 `$META/run.sh stop`.
 - **세션 영속 (2026-11-24 변경)**: 작업 공간이 프로필의 기본 컨텍스트를 써서 쿠키·localStorage·
   IndexedDB가 프로필 디렉터리에 저장된다. 공간을 닫거나 데몬이 내려가도(완전 재시작 포함)
@@ -80,13 +115,16 @@ exec로 읽을 때는 기본으로 `--fp`를 붙여라. 단, 본문이 서브도
 - 반드시 `config.env`의 CHROME_PATH(chrome-wrapper.sh) 경유로만 실행. 스톡 Chromium 직접 실행 금지.
   `--ignore-certificate-errors` 금지 (인증서 검증 ON이 기본). `/opt/meta-chromium/chrome` 사용 금지.
 - H255에 세션이 있는 사이트(부동산뱅크·직방)는 이 도구가 아니라 H255 agent-browser로.
-- 런처 본체(`~/.local/bin/muse-ultra-browser`)는 2026-11-24 이름 전면 변경으로 파일명·내부 표기만 Muse Ultra Browser로 바뀐 것 — 기능·동작은 변경 전과 동일하다. 임의로 다른 빌드로 교체하지 않는다.
+- 런처 본체(`~/.local/bin/muse-ultra-browser`)는 2026-11-24 이름 전면 변경으로 파일명·내부 표기만 Muse Ultra Browser로 바뀐 것 — 기능·동작은 변경 전과 동일하다. 임의로 다른 빌드로 교체하지 않는다. **단 2026-11-26 사용자 전권 지시로 호출 경로의 하네스는 교체됐다**: run.sh는 이제 런처 대신 자체 raw-CDP 데몬(`cdp-daemon.mjs`/`cdp-client.mjs`)을 쓴다 (런처 바이너리 자체는 무변경, 롤백은 `backup-harness-2026-11-26/` 복원). 상세: `~/workspace/ultra-harness-2026-11-26.md`.
 
 ## 경로
 
-- 래퍼 디렉토리: `~/workspace/muse-ultra-browser-build/meta-muse-ultra/` (run.sh, fetch.sh, chain.sh, chrome-wrapper.sh,
-  idle-stop.sh, stop-relay.sh, snaptrim.py, html2text.py, routecache.py, route-cache.json, config.env)
+- 래퍼 디렉토리: `~/workspace/muse-ultra-browser-build/meta-muse-ultra/` (run.sh, batch.sh, fetch.sh, chain.sh, chrome-wrapper.sh,
+  cdp-daemon.mjs, cdp-client.mjs, idle-stop.sh, stop-relay.sh, snaptrim.py, html2text.py, routecache.py, route-cache.json, config.env)
+- CDP 데몬 상태: `~/.local/share/muse-ultra-browser/` (cdp-daemon.sock/pid, cdp-daemon.log, cdp-chrome.log)
 - 프로필: `meta-muse-ultra/profile` / 인증서 DB: `meta-muse-ultra/chrome-home/.pki/nssdb` (자동 유지)
 - 재설계 전 백업: `meta-muse-ultra/backup-2026-11-24/`
 - 영속화 변경 전 백업: `meta-muse-ultra/backup-persist-2026-11-24/` (런처 원본 + 스킬 원본)
+- 성능·카드 재설계 전 백업: `meta-muse-ultra/backup-perf-2026-11-26/` (run.sh + idle-stop.sh + 스킬 원본), 상세 기록: `~/workspace/ultra-perf-2026-11-26.md`
+- 하네스 교체 전 백업: `meta-muse-ultra/backup-harness-2026-11-26/` (run.sh + idle-stop.sh), 상세 기록: `~/workspace/ultra-harness-2026-11-26.md`
 - 지문: UA 정식 Chrome 159, ko-KR, WebGL on, webdriver=false (래퍼+CDP 오버라이드가 자동 적용)

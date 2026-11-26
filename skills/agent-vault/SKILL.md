@@ -1,6 +1,6 @@
 ---
 name: agent-vault
-description: 에이전트 전용 암호화 자격증명 저장소(vault.py)의 운용 규칙. 에이전트가 반복 로그인에 써야 하는 전용·업무용 계정의 값을, 에이전트 자신이 값을 보지 못하는 구조로 저장·사용할 때 이 스킬을 따른다. 1순위 사용처는 Ultra Browser 로그인이다. 사용자가 자격증명을 이 용도로 따로 넣어준 경우에만 쓰며, Muse Secure Vault와는 별개 시스템이다. 도구와 스킬은 이 패키지(Muse-Ultrabrowse)에 포함되어 배포되지만, 키·암호화 항목 등 내용물은 설치한 로컬에서만 생성·저장한다.
+description: 에이전트 전용 암호화 자격증명 저장소(~/workspace/agent-vault/vault.py)의 운용 규칙. 에이전트가 반복 로그인에 써야 하는 전용·업무용 계정의 값을, 에이전트 자신이 값을 보지 못하는 구조로 저장·사용할 때 이 스킬을 따른다. 1순위 사용처는 Ultra Browser 로그인이다. 사용자가 자격증명을 이 용도로 따로 넣어준 경우에만 쓰며, Muse Secure Vault와는 별개 시스템이다. 도구·스킬 자체는 공개 패키지(Muse-Ultrabrowse)에 포함되어 배포되고, 내용물(키·암호화 항목)은 설치한 로컬에서만 생성·저장한다.
 ---
 
 # agent-vault — 에이전트 자격증명 저장소
@@ -9,19 +9,8 @@ description: 에이전트 전용 암호화 자격증명 저장소(vault.py)의 �
 
 **에이전트는 값을 모른다.** 저장된 값은 에이전트의 대화 컨텍스트·도구 출력·로그·메모리에 **절대 나타나지 않는다.** 복호화와 입력은 스크립트 안에서만 일어나고, 에이전트는 성공/실패(종료 코드)만 보고받는다. 이 원칙이 깨지는 운용은 이 저장소를 쓰는 이유 자체를 없앤다.
 
-- 도구: `vault.py` (Fernet 암호화, 키 파일과 암호화 파일 분리 보관, 전부 권한 600)
-- 설계 전례: 암호화 파일 + 키 분리 + 메모리에서만 복호화하는 운용 방식을 일반화한 것이다.
-
-## 설치 (패키지에서 처음 쓸 때)
-
-이 패키지에 포함되는 것은 **도구 코드(`agent-vault/vault.py`)와 이 스킬뿐**이다. 내용물(키·암호화 항목)은 패키지에 없으며, 설치한 기계에서만 생성된다.
-
-1. `vault.py`를 **git으로 추적되지 않는 로컬 전용 디렉터리**에 복사한다 (예: `~/agent-vault/`). 레포 클론 안에서 그대로 돌리지 않는다 — 내용물이 실수로 커밋되는 사고를 막기 위해서다.
-2. 그 디렉터리에서 `python3 vault.py init`을 실행한다. 키(`keys/vault.key`)가 **그 기계에서 새로 생성**되고, `entries/`와 `meta.json`이 빈 상태로 준비된다.
-3. `keys/`·`entries/`·`meta.json`은 **어떤 경우에도 커밋·업로드하지 않는다.** 레포의 `.gitignore`에도 같은 패턴이 들어 있지만, 1번의 분리 설치가 원칙이다.
-4. 의존성: Python 3 + `cryptography` 패키지.
-
-아래 예시의 `~/agent-vault/`는 설치 위치 예시다. 실제 설치 경로로 바꿔 읽는다.
+- 도구: `~/workspace/agent-vault/vault.py` (Fernet 암호화, 키 파일과 암호화 파일 분리 보관, 전부 권한 600)
+- 전례: 부동산뱅크 에이전트 자격증명(암호화 파일 + 키 분리 + 메모리에서만 복호화) 운용 방식을 일반화한 것이다.
 
 ## 적용 범위
 
@@ -37,9 +26,9 @@ description: 에이전트 전용 암호화 자격증명 저장소(vault.py)의 �
 4. 값을 명령행 인자로 받는 경로는 도구에도 없다(argv는 셸 히스토리·프로세스 목록에 남기 때문). 인입은 `--from-file` 또는 표준입력으로만.
 
 ```bash
-python3 ~/agent-vault/vault.py store <이름> --purpose "<용도>" --from-file <사용자가 넣어둔 파일>
+python3 ~/workspace/agent-vault/vault.py store <이름> --purpose "<용도>" --from-file <사용자가 넣어둔 파일>
 # 표준입력 인입도 가능 (파일을 남기지 않는 채널일 때)
-python3 ~/agent-vault/vault.py store <이름> --purpose "<용도>" < <인입채널>
+python3 ~/workspace/agent-vault/vault.py store <이름> --purpose "<용도>" < <인입채널>
 ```
 
 ## 설치 직후 브리핑 (자격증명 부분)
@@ -59,9 +48,9 @@ Ultra Browser 설치 직후 브리핑(muse-ultra-browser 스킬의 "설치 직�
 4. 삭제는 `delete` — 암호화 파일까지 파쇄 삭제한다.
 
 ```bash
-python3 ~/agent-vault/vault.py use <이름> --via env -- <로그인 헬퍼 명령>
-python3 ~/agent-vault/vault.py list
-python3 ~/agent-vault/vault.py delete <이름>
+python3 ~/workspace/agent-vault/vault.py use <이름> --via env -- <로그인 헬퍼 명령>
+python3 ~/workspace/agent-vault/vault.py list
+python3 ~/workspace/agent-vault/vault.py delete <이름>
 ```
 
 ## 1순위 사용처: Ultra Browser 로그인 (실증 절차)
@@ -79,9 +68,9 @@ python3 ~/agent-vault/vault.py delete <이름>
 Ultra Browser의 `-f` 스크립트는 **데몬 프로세스 안에서** 실행된다. 그래서 호출하는 셸에서 `vault.py use`로 감싸는 것만으로는 부족하고, **데몬 자체가 볼트의 자식 프로세스로 떠야** 스크립트에 값이 닿는다. 이미 떠 있는 데몬은 환경을 상속하지 않으므로, 래핑 기동 전에 기존 데몬을 반드시 내린다.
 
 ```bash
-META=<meta-muse-ultra 설치 경로>
+META=~/workspace/muse-ultra-browser-build/meta-muse-ultra
 $META/run.sh stop   # 기존 데몬 정지 (래핑 없이 떠 있으면 환경이 닿지 않는다)
-python3 ~/agent-vault/vault.py use <항목> --via env -- $META/run.sh open <로그인 페이지 URL>
+python3 ~/workspace/agent-vault/vault.py use <항목> --via env -- $META/run.sh open <로그인 페이지 URL>
 # 이 첫 호출이 데몬을 볼트 자식으로 기동한다. 이후 -f 스크립트는 AGENT_VAULT_VALUE를 읽을 수 있다.
 ```
 
@@ -89,7 +78,7 @@ python3 ~/agent-vault/vault.py use <항목> --via env -- $META/run.sh open <로�
 - 값을 스크립트 파일에 직접 적는 것도 금지 — 스크립트는 항상 환경변수에서만 읽는다.
 - 연속 작업이면 래핑 기동한 호출에서 `run.sh keep`으로 데몬을 유지한다 (2FA 대기 때 필요).
 
-### 로그인 단계 순서 (구글, 실측)
+### 로그인 단계 순서 (구글, 2026-11-24 실측)
 
 1. 래핑 기동으로 `accounts.google.com`을 연다.
 2. 이메일 입력 → 다음. 비밀번호 페이지(`challenge/pwd`)로 넘어간다.
@@ -99,7 +88,7 @@ python3 ~/agent-vault/vault.py use <항목> --via env -- $META/run.sh open <로�
 ### 2단계 인증: 정지·보고·재개 규칙
 
 - **2FA 화면에 도달하면 그 자리에서 멈추는 것이 올바른 동작이다.** 우회·자동 통과·반복 재시도를 하지 않는다.
-- 멈춘 즉시 사용자에게 보고한다: 어떤 인증인지(기기 프롬프트 등), 어느 기기로 알림이 갔는지, 화면 문구의 요지. 사용자는 자기 기기에서 승인한다(예: 폰 알림에서 "예" 탭).
+- 멈춘 즉시 사용자에게 보고한다: 어떤 인증인지(기기 프롬프트 등), 어느 기기로 알림이 갔는지, 화면 문구의 요지. 사용자는 자기 기기에서 승인한다(예: Galaxy S23 알림에서 "예" 탭).
 - 대기 중에는 **태스크 스페이스를 keep 모드로 열어 둔 채** 기다린다. 스페이스를 닫거나 데몬을 내리면 승인 후 이어갈 수 없다.
 - 사용자가 승인했다고 알리면, 같은 데몬이 떠 있는 동안 `claimTaskSpace(id)`로 같은 스페이스에 재진입해 이어서 진행한다. (데몬이 재시작되면 공간 id가 초기화되니, 그 경우 새 공간을 열되 로그인 상태는 영속 프로필에 남아 있을 수 있음을 먼저 확인한다.)
 
@@ -116,10 +105,11 @@ python3 ~/agent-vault/vault.py use <항목> --via env -- $META/run.sh open <로�
 
 ### 실증 범위 (솔직한 기록)
 
-- **2026-11-24 end-to-end 실증 완료** (패키지 유지 환경): 볼트 래핑 기동 → 이메일 입력 → 비밀번호 통과 → 2FA(`challenge/dp`) 도달·정지·보고 → 사용자 승인 → 로그인 상태 확인 → 데몬 완전 정지·일반 재기동 후에도 로그인 유지 확인까지. 절차가 있다는 것과 완료했다는 것을 섞지 않는다 — 자기 환경에서 수행한 뒤에야 실증으로 보고한다.
+- **2026-11-24 실증 완료**: 볼트 래핑 기동 → 이메일 입력 → 비밀번호 통과 → 2FA(`challenge/dp`) 도달·정지·보고까지. 항목 `google-osh3772` (구글 로그인용, 사용자 직접 인입).
+- **아직 실증 완료 기록이 없는 부분**: 승인 후 로그인 상태 확인과 데몬 재기동 후 영속 확인은 위 절차대로 수행하되, 완료했다고 기록된 바는 없다. 수행한 뒤에야 실증으로 보고한다 — 절차가 있다는 것과 완료했다는 것을 섞지 않는다.
 
 ## 금지 사항
 
 - 채팅·메모리·일반 파일에 값을 적는 행위 일체.
 - `list`·로그·보고에 값을 포함하는 행위. 보고에는 계정 이름·용도·성공/실패만 쓴다.
-- 키 파일(`keys/`)·암호화 항목(`entries/`)·`meta.json` 등 **내용물을 GitHub 등 외부에 올리는 행위**. (도구 코드와 이 스킬 자체는 패키지에 포함되어 배포되지만, 내용물은 설치한 로컬 전용이다.)
+- 키 파일·암호화 항목·meta.json 등 내용물을 GitHub 등 외부에 올리는 행위. (도구·스킬 자체는 Muse-Ultrabrowse 패키지에 포함되어 배포되지만, 내용물은 로컬 전용이다 — 사용자 결정 2026-11-24.)
