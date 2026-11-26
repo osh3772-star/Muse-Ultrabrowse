@@ -8,7 +8,7 @@
 // the strings run.sh's retry greps for ("daemon.sock" / "ECONNREFUSED").
 import { connect } from 'node:net';
 import { spawn } from 'node:child_process';
-import { existsSync, openSync } from 'node:fs';
+import { existsSync, mkdirSync, openSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -30,6 +30,10 @@ async function ensureDaemon() {
   try { const s = await tryConnect(); s.destroy(); return; } catch {}
   // Spawn the daemon detached with THIS process's environment (the old
   // harness had the same semantics: scripts see the daemon-start env).
+  // STATE_DIR must exist before opening the log file — on a fresh install
+  // it does not, and openSync throws ENOENT before the daemon (which would
+  // create the dir itself) ever starts. Bug found 2026-11-26.
+  mkdirSync(STATE_DIR, { recursive: true });
   const logFd = openSync(join(STATE_DIR, 'cdp-daemon.log'), 'a');
   const child = spawn(process.execPath, [DAEMON], {
     detached: true, stdio: ['ignore', logFd, logFd], env: process.env,
