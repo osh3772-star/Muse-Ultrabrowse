@@ -55,6 +55,19 @@ warm / keep / stop
 단계별 출력 + `%%BATCH-STEP%%` 헤더, 마지막에 `%%BATCH%% steps=.. ok=.. fail=..`
 요약 줄이 나온다. 한 단계가 실패해도 나머지는 계속 실행된다.
 
+**환경 점검 `doctor` (2026-11-26 신설)**: `$META/run.sh doctor [--smoke]` (또는
+`$META/doctor.sh` 직접). ub-config.sh의 해석 규칙 그대로 Node ≥22·python3·curl·
+socat/certutil(조건부), Chromium 자동 탐지 경로와 버전, CHROME_PATH 실행 가능
+여부, config.env 유효성, 상태/프로필/chrome-home 디렉터리 생성·쓰기 가능 여부
+(없는 디렉터리는 실제로 만들어 확인 — 신규 설치 ENOENT 부류 방지; 기존 프로필
+디렉터리에는 쓰지 않음), 프록시 도달 가능성(호스트:포트만 출력), NSS DB 준비
+상태를 항목별 PASS/FAIL/SKIP + 한 줄 사유로 출력하고 치명 항목 실패 시 종료
+코드가 비0이다. 기본 실행은 검사만이라 실제 데몬·프로필을 건드리지 않는다.
+`--smoke`는 임시 상태/프로필/chrome-home으로 데몬을 띄워 eval 왕복 후 정지까지
+확인한다 (실제 프로필 무접촉). 새 인스턴스 설치 직후와 "우리 VM에선 되는데
+신규 설치에서 깨지는" 부류의 진단에 먼저 돌릴 것. 설치 절차는 repo INSTALL.md
+3단계에도 들어 있다.
+
 **노카드 모드 `--fp` (2026-11-24 실측, 2026-11-26 복구·재검증)**: exec 네트워크 승인은 호스트마다 카드가 뜨는데,
 페이지 본체가 아니라 광고·추적 서브리소스 호스트가 대부분이다. `--fp`는 CDP Fetch로
 전 요청을 가로채 ① 대상 호스트 정확 일치(www 유무 변형 포함)만 통과, 서브도메인 포함
@@ -76,6 +89,15 @@ exec로 읽을 때는 기본으로 `--fp`를 붙여라. 단, 본문이 서브도
 Runtime.evaluate와 교착한다 (상세: `~/workspace/ultra-harness-2026-11-26.md`).
 재검증 (2026-11-26, 교체 후): YNA 기사 --fp read 4.7초·18,650자, 검증 구간
 전체 카드 **0장**.
+
+**입력 프리미티브 (2026-11-26 이식)**: 데몬 page 객체에 muse-desktop `chromeControl.js`(MIT)에서 이식한 입력 메서드가 있다 — 지금까지는 상호작용을 전부 임의 JS로 짜야 했는데, 이제 ref 기반으로 된다. `-f` 스크립트 안에서:
+- `await p.elements()` — 보이는 상호작용 요소 목록: `{id:'e1', kind, x, y, type?, text?, label?, placeholder?, href?, value?, checked?, disabled?}` + `{url, title, truncated}`. 상한 300개. 비밀번호 입력은 값이 아니라 type만 나온다. 요소마다 `data-muse-id` 속성이 박혀 이후 호출이 그걸로 찾는다.
+- `await p.click(ref)` — ref는 `'e3'`(elements의 id), CSS 셀렉터 문자열, `{id}`/`{selector}` 중 하나. scrollIntoView 후 중심점에 CDP `Input.dispatchMouseEvent`로 실제 클릭.
+- `await p.type(ref, text, {clear:true})` — ref에 포커스 → (clear 시 Ctrl+A+Backspace) → `Input.insertText`. `await p.typeText(text)`는 현재 포커스된 곳에 바로 입력.
+- `await p.press(key)` — `'Enter' 'Tab' 'Escape' 'Backspace' 'Delete' 방향키 'Home' 'End' 'PageUp/Down' 'Space' 'F1'~'F12'` 또는 한 글자. CDP `Input.dispatchKeyEvent` (특수키 표도 chromeControl에서 이식).
+- 요소가 사라졌으면 `element_not_found` 에러 — `elements()`를 다시 불러 새 id를 쓸 것.
+- 기존 AX `p.snapshot()`은 그대로 있다 (구조 파악용). 좌표 클릭이 필요하면 `elements()` 쪽.
+- 이식 상세·백업: 데몬 주석(Transplanted 2026-11-26), 백업 `meta-muse-ultra/backup-input-2026-11-26/`. 검증: data: 테스트 페이지에서 elements→click(버튼 핸들러 발동)·type·press('Enter' keydown 발동)·clear 교체·셀렉터 클릭 전부 통과, 기존 `--fp` read 회귀 없음(위키 5.8초), 검증 구간 카드 0장(종료 후 65초 대기해 history로 셈).
 
 ## 출력 계약
 

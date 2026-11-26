@@ -15,8 +15,8 @@ npm 의존성 0. 별도로 설치할 바이너리는 없고, 저장소를 클론
 | Node.js | ≥ 22 | CDP 데몬·클라이언트 실행 (Node 22 내장 전역 WebSocket 등 사용) |
 | Chromium | Chrome for Testing 159 (Playwright 설치본) | 브라우저 본체 |
 | python3 | 표준 라이브러리만 | 스냅샷 후처리(`snaptrim.py`), 본문 추출 |
-| socat | | 로컬 프록시 릴레이(127.0.0.1:18080) |
-| certutil, openssl | NSS 도구 | 브라우저 전용 NSS DB에 egress CA 임포트 |
+| socat | | 로컬 프록시 릴레이(127.0.0.1:18080) — 비로컬 프록시가 설정된 환경에서만 |
+| certutil, openssl | NSS 도구 | 브라우저 전용 NSS DB에 egress CA 임포트 — 프록시 CA가 있는 환경에서만 |
 | curl | | L0 경량 fetch(`fetch.sh`) |
 
 Chromium은 Playwright로 설치한다:
@@ -26,7 +26,11 @@ npx playwright install chromium
 # → ~/.cache/ms-playwright/chromium-*/chrome-linux*/chrome
 ```
 
-`config.env`의 `CHROME_PATH`가 비어 있으면 `run.sh`가 이 경로를 자동 탐색한다.
+`CHROME_PATH`(데몬이 실행할 래퍼)의 기본값은 트리의 `chrome-wrapper.sh`이며,
+래퍼가 실제 Chromium 바이너리를 자동 탐지한다 — 명시 지정
+(`MUSE_ULTRA_CHROME`/`CHROME_BIN`) > Playwright 캐시의 최신 `chromium-*`
+리비전 > PATH 순. 탐지 결과는 아래 `./doctor.sh`의 chromium 항목으로
+확인할 수 있다.
 
 ## 설치 절차
 
@@ -48,9 +52,11 @@ cp config.env.example config.env
 
 `config.env` 항목:
 
-- `CHROME_PATH` — `chrome-wrapper.sh`의 경로로 지정한다. 이 샌드박스 환경에서는
-  릴레이와 NSS DB를 붙이는 래퍼 경유가 필수이며, 래퍼가 실제 Chromium
-  바이너리를 실행한다. 스톡 Chromium을 직접 가리키지 않는다.
+- `CHROME_PATH` — 데몬이 실행할 래퍼. 기본값이 이 트리의
+  `chrome-wrapper.sh`라 보통은 비워 둔다 (예시 파일에서도 주석 처리돼 있다).
+  이 샌드박스 환경에서는 릴레이와 NSS DB를 붙이는 래퍼 경유가 필수이며,
+  래퍼가 실제 Chromium 바이너리를 실행한다. 스톡 Chromium을 직접
+  가리키지 않는다.
 - `MUSE_ULTRA_PROFILE` — durable 브라우저 프로필 경로 (기본값은
   `meta-muse-ultra/profile`). 로그인 세션이 이 프로필에 유지된다.
 - `MUSE_ULTRA_HEADLESS` — `1` (헤드리스 실행).
@@ -58,7 +64,20 @@ cp config.env.example config.env
   빈 값이 기본이고, 기본 운전은 외부 API 없이 에이전트가 판단해 호출하는
   방식이므로 비워 둔다.
 
-### 3. NSS DB 준비 (인증서)
+### 3. 환경 점검 (doctor)
+
+```bash
+./doctor.sh          # 검사만 (실제 데몬·프로필 무변경)
+./doctor.sh --smoke  # 임시 상태/프로필로 데몬 기동 → eval 왕복 → 정지까지
+```
+
+Node ≥ 22, python3, curl 같은 필수 도구, Chromium 자동 탐지 결과와 경로,
+`config.env` 유효성, 상태/프로필 디렉터리의 생성 가능 여부, 프록시 도달
+가능성, NSS DB 준비 상태를 항목별 PASS/FAIL/SKIP로 출력한다. 치명 항목이
+실패하면 종료 코드가 0이 아니다. 아래 단계에서 막히면 먼저 이 출력의
+FAIL 항목부터 확인할 것.
+
+### 4. NSS DB 준비 (인증서)
 
 egress 프록시가 TLS를 중계하는 환경에서는, 프록시 CA를 브라우저 전용 NSS DB에
 넣어야 인증서 검증이 성립한다.
@@ -67,21 +86,24 @@ egress 프록시가 TLS를 중계하는 환경에서는, 프록시 CA를 브라�
 ./ensure-nssdb.sh
 ```
 
-- `chrome-home/.pki/nssdb`에 egress CA를 `CT,C,C` 신뢰로 임포트한다. CA 경로는
-  기본값 `/usr/local/share/ca-certificates/hatch-egress-ca.crt`이며,
-  환경변수 `HATCH_EGRESS_CA`로 바꿀 수 있다.
+- `chrome-home/.pki/nssdb`에 프록시 CA를 `CT,C,C` 신뢰로 임포트한다. CA 경로는
+  `config.env`의 `UB_PROXY_CA`가 1순위이고 구 변수 `HATCH_EGRESS_CA`도
+  인식하며, 둘 다 없으면 레거시 경로
+  (`/usr/local/share/ca-certificates/hatch-egress-ca.crt`)를 자동 탐지한다.
+  프록시 CA가 없는 환경에서는 이 단계 전체를 건너뛴다.
 - `chrome-wrapper.sh`가 실행 때마다 이 스크립트를 자동 호출해 지문을 대조하고
   필요하면 재생성하므로, 수동 실행은 초기 확인용이다.
 - `--ignore-certificate-errors`는 쓰지 않는다 — 인증서 검증 ON이 기본이다.
 
-### 4. 릴레이 (자동)
+### 5. 릴레이 (자동)
 
 egress 프록시가 Chromium 프로세스의 직접 CONNECT를 막는 환경에 대응해,
-`chrome-wrapper.sh`가 `127.0.0.1:18080` socat 릴레이를 자동 기동하고
-Chromium에 `--proxy-server`로 지정한다. 수동 설정은 없다. 릴레이만 따로
-끄려면 `./stop-relay.sh`를 쓴다.
+비로컬 프록시가 설정돼 있으면 `chrome-wrapper.sh`가 socat 릴레이
+(기본 `127.0.0.1:18080`, `UB_RELAY_PORT`로 변경 가능)를 자동 기동하고
+Chromium에 `--proxy-server`로 지정한다. 프록시가 없으면 릴레이도 없다.
+릴레이만 따로 끄려면 `./stop-relay.sh`를 쓴다.
 
-### 5. 데몬 선기동
+### 6. 데몬 선기동
 
 ```bash
 ./run.sh warm
@@ -92,7 +114,7 @@ Chromium에 `--proxy-server`로 지정한다. 수동 설정은 없다. 릴레이
 `~/.local/share/muse-ultra-browser/` 아래에 생긴다
 (`cdp-daemon.sock`, `cdp-daemon.pid`, `cdp-daemon.log`, `cdp-chrome.log`).
 
-### 6. 동작 확인
+### 7. 동작 확인
 
 ```bash
 ./run.sh read https://example.com
@@ -110,6 +132,7 @@ Chromium에 `--proxy-server`로 지정한다. 수동 설정은 없다. 릴레이
 ## 사용법 요약
 
 ```bash
+./run.sh doctor [--smoke]   # 환경 점검 (도구·Chromium 탐지·디렉터리·프록시·NSS)
 ./run.sh open <url>          # 이동 + 구조 스냅샷
 ./run.sh read <url>          # 본문 텍스트
 ./run.sh read --lean <url>   # 이미지·폰트·미디어 요청 차단 (읽기 전용 작업용)

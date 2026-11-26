@@ -16,6 +16,8 @@
 #   run.sh warm          — pre-start the daemon (skip cold start on next call)
 #   run.sh batch <file>  — run several steps from a file in this one process
 #                          (see batch.sh; one exec, daemon started once)
+#   run.sh doctor [--smoke] — environment checks (see doctor.sh; --smoke boots
+#                          a throwaway daemon on temp dirs for an eval round-trip)
 # open/read/js print a final structured line:
 #   %%CHAIN%% lane=L1 mode=<m> status=ok|fail code=<F-*|-> elapsed_s=<n> chars=<n> via=<full|viewport|->
 # The launcher auto-starts its daemon on the first real call; do NOT pre-wait
@@ -90,6 +92,7 @@ case "${1:-}" in
     rm -f "$WARMJS" "$WARMERR"
     if [ $WRC -eq 0 ]; then echo "daemon warm"; else echo "warm failed rc=$WRC" >&2; exit 1; fi
     exit 0 ;;
+  doctor) shift; exec "$HERE/doctor.sh" "$@" ;;
   batch) shift; exec "$HERE/batch.sh" "$@" ;;
 esac
 
