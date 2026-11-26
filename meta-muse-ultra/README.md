@@ -128,5 +128,6 @@ read(full_page) 52.8초, full_page 스냅샷 단독 28.8초, **뷰포트 스냅�
 - 일반 사이트 사용 가능 (인증서 검증 켜짐). 단, H255 크롬에 세션이 있는 사이트
   (부동산뱅크·직방)는 기존 라우팅대로 H255 agent-browser 담당 — 이 도구의 프로필에
   그 세션이 생기는 것은 아니다.
-- 라이선스: muse-ultra-browser 저장소 자체에는 LICENSE 파일 없음. 내장 하네스는 citrolabs/muse-ultra-browser이며
-  build-single.sh에 MIT로 표기됨. muse-ultra-browser.mjs 자체의 라이선스 표기는 확인되지 않음 (개인 테스트베드 사용).
+- 라이선스: muse-ultra-browser 저장소 자체에는 LICENSE 파일 없음. 구 하네스(단일 파일 런처 번들)는 citrolabs/muse-ultra-browser이며
+  build-single.sh에 MIT로 표기됨. 현행 하네스는 자체 raw CDP 데몬(cdp-daemon.mjs/cdp-client.mjs)으로,
+  2026-11-26 하네스 교체 때 구 런처 번들은 저장소에서 제거됐다.

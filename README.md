@@ -68,7 +68,7 @@ The cache is a hint only — outcomes are still measured on every run.
 ### Resource behavior
 
 Nothing runs at idle. The L1 daemon starts on demand with the first call
-and **stops automatically after an idle period** (default 120 s,
+and **stops automatically after an idle period** (default 600 s,
 configurable), together with its local proxy relay. While running, expect
 roughly 0.1 GB for the daemon and ~1.1 GB RSS for the Chromium process
 group. A `keep` command pins the daemon up for long interactive sessions,
@@ -76,9 +76,11 @@ and `stop` shuts everything down immediately.
 
 ## Requirements
 
-- Linux with Node.js (the L1 launcher is a single-file Node program)
+- Linux with Node.js ≥ 22 (the L1 harness is a dependency-free Node
+  daemon + client — `cdp-daemon.mjs` / `cdp-client.mjs` — speaking raw CDP)
 - Chrome for Testing (or another stock Chromium build) — downloaded
-  separately; the launcher is pointed at it via configuration
+  separately; `CHROME_PATH` in `config.env` points at the wrapper script
+  that launches it
 - `curl` and `python3` (standard library only) for the L0 lane
 - Network egress. If your environment forces traffic through an HTTP
   proxy that rejects direct CONNECTs from Chromium, the wrapper starts a
@@ -86,13 +88,15 @@ and `stop` shuts everything down immediately.
   TLS-intercepts, import its CA into a dedicated NSS database for the
   browser profile instead of disabling certificate verification.
 
-## Install (generic outline)
+## Install
 
-1. Place the launcher binary somewhere on your `PATH`
-   (e.g. `~/.local/bin/`).
+Full procedure: [INSTALL.md](INSTALL.md). Outline:
+
+1. Clone this repository — there is no separate launcher binary; the
+   daemon, client and wrapper scripts live in `meta-muse-ultra/`.
 2. Install a Chrome for Testing build and set `CHROME_PATH` in
-   `config.env` to the wrapper script (or directly to the binary if your
-   network needs no relay).
+   `config.env` to the wrapper script (`meta-muse-ultra/chrome-wrapper.sh`;
+   or directly to the binary if your network needs no relay).
 3. Copy `config.env.example` to `config.env` and adjust the profile path
    and headless setting.
 4. Run the verification below.

@@ -1,64 +1,132 @@
-# UltraBrowse 설치 안내 (다른 Muse 인스턴스용)
+# 설치 — Muse Ultra Browser (뮤즈 울트라브라우즈)
 
-UltraBrowse는 Muse Ultra Browser 하네스를 스톡 Chromium CDP 위에서 돌리는 muse-ultra-browser 개조본이다.
-외부 API 키 없이, 설치한 Muse 인스턴스 자신이 exec로 호출해 운전한다.
+현행 빌드(2026-11-26 하네스 교체 이후) 기준의 설치 절차다.
 
-## 구성
+하네스는 단일 파일 런처 번들이 아니라, 이 저장소의 `meta-muse-ultra/` 안에 있는
+자체 raw CDP 데몬이 담당한다 — `cdp-daemon.mjs`(데몬) + `cdp-client.mjs`(클라이언트),
+npm 의존성 0. 별도로 설치할 바이너리는 없고, 저장소를 클론하면 구성 파일이 전부
+들어 있다. `run.sh`가 이 데몬을 통해 Chromium을 운전한다.
 
-- `muse-ultra-browser.mjs` — 런처 본체 (Node 단일 파일, muse-ultra-browser 4.0.0 기반)
-- `meta-muse-ultra/` — Muse VM egress 환경용 래퍼 (socat 릴레이, 전용 NSS DB, 데몬 warm, 스냅샷 트림)
-- `skills/` — ultrabrowse · browser-chain 스킬 문서
+## 사전 요건
 
-## 요구 사항
+| 항목 | 요건 | 용도 |
+|---|---|---|
+| OS | Linux | |
+| Node.js | ≥ 22 | CDP 데몬·클라이언트 실행 (Node 22 내장 전역 WebSocket 등 사용) |
+| Chromium | Chrome for Testing 159 (Playwright 설치본) | 브라우저 본체 |
+| python3 | 표준 라이브러리만 | 스냅샷 후처리(`snaptrim.py`), 본문 추출 |
+| socat | | 로컬 프록시 릴레이(127.0.0.1:18080) |
+| certutil, openssl | NSS 도구 | 브라우저 전용 NSS DB에 egress CA 임포트 |
+| curl | | L0 경량 fetch(`fetch.sh`) |
 
-- Node.js 20+
-- Chromium for Testing (Playwright chromium 빌드)
-- socat, certutil (libnss3-tools) — egress CA 등록용
+Chromium은 Playwright로 설치한다:
 
-## 설치
+```bash
+npx playwright install chromium
+# → ~/.cache/ms-playwright/chromium-*/chrome-linux*/chrome
+```
 
-1. 런처 배치
-   ```bash
-   mkdir -p ~/.local/bin
-   cp muse-ultra-browser.mjs ~/.local/bin/muse-ultra-browser
-   chmod +x ~/.local/bin/muse-ultra-browser
-   ln -sf ~/.local/bin/muse-ultra-browser ~/.local/bin/muse-ultra-browser
-   ```
-2. 래퍼 배치
-   ```bash
-   mkdir -p ~/workspace/muse-ultra-browser-build
-   cp -r meta-muse-ultra ~/workspace/muse-ultra-browser-build/
-   cd ~/workspace/muse-ultra-browser-build/meta-muse-ultra
-   cp config.env.example config.env
-   ```
-3. 자기 VM의 Chromium 경로에 맞추기
-   - `meta-muse-ultra/chrome-wrapper.sh`의 `REAL_CHROME`을 자기 VM의
-     `~/.cache/ms-playwright/chromium-XXXX/chrome-linux64/chrome` 경로로 수정.
-   - 빌드 번호(XXXX)는 VM마다 다를 수 있다. `ls ~/.cache/ms-playwright/`로 확인.
-4. egress CA를 전용 NSS DB에 등록 (인증서 검증 유지)
-   ```bash
-   bash ~/workspace/muse-ultra-browser-build/meta-muse-ultra/ensure-nssdb.sh
-   ```
-5. 스킬 등록 (선택)
-   ```bash
-   cp -r skills/ultrabrowse skills/browser-chain ~/workspace/custom-skills/
-   ```
-6. 동작 확인
-   ```bash
-   ~/workspace/muse-ultra-browser-build/meta-muse-ultra/run.sh warm
-   ~/workspace/muse-ultra-browser-build/meta-muse-ultra/run.sh open https://example.com
-   ```
+`config.env`의 `CHROME_PATH`가 비어 있으면 `run.sh`가 이 경로를 자동 탐색한다.
 
-## 사용
+## 설치 절차
 
-- `run.sh open <url>` / `run.sh read <url>` / `run.sh warm` (데몬 예열)
-- 원샷 실행이 기본: 작업 1개 = 스크립트 1개 = 호출 1회.
-- `meta-muse-ultra/profile/`(쿠키·세션)과 `meta-muse-ultra/chrome-home/`(NSS DB)은 실행 중 생기는
-  런타임 상태라 배포본에 포함하지 않는다. 각 인스턴스가 자기 것으로 만든다.
-- `config.env`의 API 슬롯은 비워 둔다. 기본 운전은 외부 API가 아니라 Muse 자신의 판단이다.
+### 1. 저장소 배치
 
-## 한계
+이 저장소를 클론하고 `meta-muse-ultra/` 디렉터리로 이동한다. 스크립트에 실행
+권한이 없으면 부여한다 (파일 모드가 보존되지 않는 경로로 받았을 때 필요).
 
-- VM egress IP가 사이트에 막히면(예: 나무위키 Cloudflare) 이 레인으로는 못 연다.
-  browser-chain 스킬의 폴백 순서(L1 UltraBrowse → L2 클라우드 브라우저)를 따른다.
-- 스텔스는 정식 포크(Muse Ultra Browser)가 아니라 스톡 Chromium + CDP라 봇 차단이 강한 사이트에선 약하다.
+```bash
+cd meta-muse-ultra
+chmod +x *.sh
+```
+
+### 2. 설정 파일
+
+```bash
+cp config.env.example config.env
+```
+
+`config.env` 항목:
+
+- `CHROME_PATH` — `chrome-wrapper.sh`의 경로로 지정한다. 이 샌드박스 환경에서는
+  릴레이와 NSS DB를 붙이는 래퍼 경유가 필수이며, 래퍼가 실제 Chromium
+  바이너리를 실행한다. 스톡 Chromium을 직접 가리키지 않는다.
+- `MUSE_ULTRA_PROFILE` — durable 브라우저 프로필 경로 (기본값은
+  `meta-muse-ultra/profile`). 로그인 세션이 이 프로필에 유지된다.
+- `MUSE_ULTRA_HEADLESS` — `1` (헤드리스 실행).
+- `MUSE_ULTRA_API_PROVIDER` / `MUSE_ULTRA_API_KEY` — 등록만 가능한 슬롯.
+  빈 값이 기본이고, 기본 운전은 외부 API 없이 에이전트가 판단해 호출하는
+  방식이므로 비워 둔다.
+
+### 3. NSS DB 준비 (인증서)
+
+egress 프록시가 TLS를 중계하는 환경에서는, 프록시 CA를 브라우저 전용 NSS DB에
+넣어야 인증서 검증이 성립한다.
+
+```bash
+./ensure-nssdb.sh
+```
+
+- `chrome-home/.pki/nssdb`에 egress CA를 `CT,C,C` 신뢰로 임포트한다. CA 경로는
+  기본값 `/usr/local/share/ca-certificates/hatch-egress-ca.crt`이며,
+  환경변수 `HATCH_EGRESS_CA`로 바꿀 수 있다.
+- `chrome-wrapper.sh`가 실행 때마다 이 스크립트를 자동 호출해 지문을 대조하고
+  필요하면 재생성하므로, 수동 실행은 초기 확인용이다.
+- `--ignore-certificate-errors`는 쓰지 않는다 — 인증서 검증 ON이 기본이다.
+
+### 4. 릴레이 (자동)
+
+egress 프록시가 Chromium 프로세스의 직접 CONNECT를 막는 환경에 대응해,
+`chrome-wrapper.sh`가 `127.0.0.1:18080` socat 릴레이를 자동 기동하고
+Chromium에 `--proxy-server`로 지정한다. 수동 설정은 없다. 릴레이만 따로
+끄려면 `./stop-relay.sh`를 쓴다.
+
+### 5. 데몬 선기동
+
+```bash
+./run.sh warm
+```
+
+첫 실제 호출이 데몬을 자동 기동하지만, 다단계 작업 전에는 `warm`으로 미리
+띄워 두면 콜드 스타트와 소켓 경합을 피할 수 있다. 데몬 상태 파일은
+`~/.local/share/muse-ultra-browser/` 아래에 생긴다
+(`cdp-daemon.sock`, `cdp-daemon.pid`, `cdp-daemon.log`, `cdp-chrome.log`).
+
+### 6. 동작 확인
+
+```bash
+./run.sh read https://example.com
+```
+
+성공하면 본문 뒤에 결과 줄이 붙고 종료 코드는 0이다:
+
+```
+%%CHAIN%% lane=L1 mode=read status=ok ... chars=...
+```
+
+상태 확인은 `./run.sh status`, 종료는 `./run.sh stop`이다. 호출이 없으면
+데몬과 릴레이는 600초 뒤 자동 정지한다 (상주시키려면 `./run.sh keep`).
+
+## 사용법 요약
+
+```bash
+./run.sh open <url>          # 이동 + 구조 스냅샷
+./run.sh read <url>          # 본문 텍스트
+./run.sh read --lean <url>   # 이미지·폰트·미디어 요청 차단 (읽기 전용 작업용)
+./run.sh read --fp <url>     # 대상 호스트만 통과시키는 엄격 모드 (광고·추적 많은 페이지용)
+./run.sh batch steps.txt     # 여러 단계를 exec 1회로 실행
+./run.sh -f script.js        # 임의 JS (파일로만)
+./fetch.sh <url>             # L0: 브라우저 없는 경량 fetch
+./chain.sh read <url>        # 체인 진입점 (L0 → L1 → L2 폴백)
+```
+
+## 주의
+
+- 항상 `config.env`의 `CHROME_PATH`(래퍼)를 경유해 실행한다. 스톡 Chromium
+  직접 실행과 `--ignore-certificate-errors`는 금지.
+- JS는 `-f` 파일로 넘긴다. 표준입력 파이프로 넘기면 클라이언트가 종료되지
+  않는 hang이 있다.
+- `profile/`, `chrome-home/`, `config.env`는 런타임 상태라 저장소에 올리지
+  않는다 (`.gitignore`로 차단됨).
+- 스크립트 API와 운용 규칙의 상세는 `meta-muse-ultra/README.md`와
+  `skills/muse-ultra-browser/SKILL.md`를 본다.
