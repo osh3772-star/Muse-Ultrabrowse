@@ -112,15 +112,20 @@ Runtime.evaluate와 교착한다 (상세: `~/workspace/ultra-harness-2026-11-26.
 
 ## 금지·주의
 
-- 반드시 `config.env`의 CHROME_PATH(chrome-wrapper.sh) 경유로만 실행. 스톡 Chromium 직접 실행 금지.
+- 반드시 CHROME_PATH(chrome-wrapper.sh) 경유로만 실행. 스톡 Chromium 직접 실행 금지.
+  환경값(Chromium 바이너리·프록시·프록시 CA/NSS·상태/프로필 경로)은 코드에 고정돼 있지
+  않고 `ub-config.sh`가 config.env·표준 환경변수에서 해석한다 (2026-11-26 이식성 패스:
+  Chromium은 명시 경로 > Playwright 캐시 최신 리비전 > PATH 순 자동 탐지, 프록시
+  미설정이면 직접 연결, CA 미설정이면 NSS 단계 생략). 다른 인스턴스에서는
+  `config.env.example`의 선택 변수만 채우면 된다.
   `--ignore-certificate-errors` 금지 (인증서 검증 ON이 기본). `/opt/meta-chromium/chrome` 사용 금지.
 - H255에 세션이 있는 사이트(부동산뱅크·직방)는 이 도구가 아니라 H255 agent-browser로.
 - 런처 본체(`~/.local/bin/muse-ultra-browser`)는 2026-11-24 이름 전면 변경으로 파일명·내부 표기만 Muse Ultra Browser로 바뀐 것 — 기능·동작은 변경 전과 동일하다. 임의로 다른 빌드로 교체하지 않는다. **단 2026-11-26 사용자 전권 지시로 호출 경로의 하네스는 교체됐다**: run.sh는 이제 런처 대신 자체 raw-CDP 데몬(`cdp-daemon.mjs`/`cdp-client.mjs`)을 쓴다 (런처 바이너리 자체는 무변경, 롤백은 `backup-harness-2026-11-26/` 복원). 상세: `~/workspace/ultra-harness-2026-11-26.md`.
 
 ## 경로
 
-- 래퍼 디렉토리: `~/workspace/muse-ultra-browser-build/meta-muse-ultra/` (run.sh, batch.sh, fetch.sh, chain.sh, chrome-wrapper.sh,
-  cdp-daemon.mjs, cdp-client.mjs, idle-stop.sh, stop-relay.sh, snaptrim.py, html2text.py, routecache.py, route-cache.json, config.env)
+- 래퍼 디렉토리: `~/workspace/muse-ultra-browser-build/meta-muse-ultra/` (run.sh, batch.sh, fetch.sh, chain.sh, chrome-wrapper.sh, ub-config.sh,
+  cdp-daemon.mjs, cdp-client.mjs, idle-stop.sh, stop-relay.sh, snaptrim.py, html2text.py, routecache.py, route-cache.json, config.env, config.env.example)
 - CDP 데몬 상태: `~/.local/share/muse-ultra-browser/` (cdp-daemon.sock/pid, cdp-daemon.log, cdp-chrome.log)
 - 프로필: `meta-muse-ultra/profile` / 인증서 DB: `meta-muse-ultra/chrome-home/.pki/nssdb` (자동 유지)
 - 재설계 전 백업: `meta-muse-ultra/backup-2026-11-24/`

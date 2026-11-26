@@ -30,12 +30,27 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [ -f "$HERE/config.env" ] && set -a && . "$HERE/config.env" && set +a
 export PATH="$HOME/.local/bin:$PATH"
-if [ -z "${CHROME_PATH:-}" ]; then
-  PW=$(ls ~/.cache/ms-playwright/chromium-*/chrome-linux*/chrome 2>/dev/null | head -1 || true)
-  if [ -n "$PW" ]; then export CHROME_PATH="$PW";
-  else export CHROME_PATH=/opt/meta-chromium/chrome; fi  # note: meta-chromium cannot run standalone (see README)
+# Environment resolution (Chromium, proxy, CA/NSS, dirs) lives in
+# ub-config.sh — no machine-specific paths are hardcoded here.
+. "$HERE/ub-config.sh"
+# CHROME_PATH is what the daemon spawns as "Chrome". Default: this tree's
+# chrome-wrapper.sh, which resolves the real binary/proxy/NSS from config.
+# An explicit CHROME_PATH in config.env wins (wrapper or raw binary).
+export CHROME_PATH="${CHROME_PATH:-$HERE/chrome-wrapper.sh}"
+if [ ! -x "$CHROME_PATH" ]; then
+  echo "run.sh: CHROME_PATH is not executable: $CHROME_PATH" >&2
+  echo "run.sh: set CHROME_PATH in config.env (default: this tree's chrome-wrapper.sh)" >&2
+  exit 1
 fi
 export MUSE_ULTRA_HEADLESS="${MUSE_ULTRA_HEADLESS:-1}"
+# Chromium version for the UA / client-hints override in generated scripts,
+# derived from the resolved binary so the fingerprint matches the install
+# (falls back to the last verified version when resolution is impossible).
+UB_CHROME_BIN=$(ub_resolve_chrome 2>/dev/null || true)
+UB_CHROME_FULL=$(ub_chrome_full_version "$UB_CHROME_BIN" 2>/dev/null || true)
+UB_CHROME_MAJOR="${UB_CHROME_FULL%%.*}"
+[ -n "$UB_CHROME_MAJOR" ] || UB_CHROME_MAJOR=159
+[ -n "$UB_CHROME_FULL" ] || UB_CHROME_FULL=159.0.8154.6
 MUSE_ULTRA_TIMEOUT=60
 STATE="$HERE/.chain-state"
 mkdir -p "$STATE"
@@ -268,13 +283,13 @@ try {
   t = await taskSpace("ub" + Date.now());
   const p = await t.newPage();
   try { await p.cdp('Emulation.setUserAgentOverride', {
-    userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/159.0.0.0 Safari/537.36',
+    userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${UB_CHROME_MAJOR}.0.0.0 Safari/537.36',
     acceptLanguage: 'ko-KR,ko,en-US,en',
     platform: 'Linux',
     userAgentMetadata: {
-      brands: [{brand: 'Google Chrome', version: '159'}, {brand: 'Chromium', version: '159'}, {brand: 'Not A(Brand', version: '8'}],
-      fullVersionList: [{brand: 'Google Chrome', version: '159.0.8154.6'}, {brand: 'Chromium', version: '159.0.8154.6'}, {brand: 'Not A(Brand', version: '8.0.0.0'}],
-      fullVersion: '159.0.8154.6',
+      brands: [{brand: 'Google Chrome', version: '${UB_CHROME_MAJOR}'}, {brand: 'Chromium', version: '${UB_CHROME_MAJOR}'}, {brand: 'Not A(Brand', version: '8'}],
+      fullVersionList: [{brand: 'Google Chrome', version: '${UB_CHROME_FULL}'}, {brand: 'Chromium', version: '${UB_CHROME_FULL}'}, {brand: 'Not A(Brand', version: '8.0.0.0'}],
+      fullVersion: '${UB_CHROME_FULL}',
       platform: 'Linux', platformVersion: '', architecture: 'x86', model: '', mobile: false, bitness: '64', wow64: false
     }
   }); } catch (e) { /* wrapper flags + profile prefs still guarantee defaults */ }

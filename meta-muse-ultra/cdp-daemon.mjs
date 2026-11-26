@@ -11,6 +11,7 @@
 // It exposes the same script surface run.sh generates code against:
 //   taskSpace(name) / claimTaskSpace(id) -> { id, name, newPage(), pages(), finish({keep}) }
 //   page: cdp(), events(), evaluate(), goto(), snapshot(), screenshot(), close()
+//   page (input, 2026-11-26): elements(), click(), focus(), type(), typeText(), press()
 // Scripts run IN THIS PROCESS (AsyncFunction), so they see this daemon's
 // environment — identical semantics to the old harness (agent-vault relies
 // on the daemon-start environment, e.g. AGENT_VAULT_VALUE).
@@ -26,11 +27,13 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import util from 'node:util';
 
-const STATE_DIR = join(homedir(), '.local', 'share', 'muse-ultra-browser');
+const STATE_DIR = process.env.MUSE_ULTRA_STATE_DIR || join(homedir(), '.local', 'share', 'muse-ultra-browser');
 const SOCK = join(STATE_DIR, 'cdp-daemon.sock');
 const PIDFILE = join(STATE_DIR, 'cdp-daemon.pid');
 const HERE = new URL('.', import.meta.url).pathname;
-const WRAPPER = join(HERE, 'chrome-wrapper.sh');
+// What to spawn as "Chrome": CHROME_PATH from the environment (config.env
+// via run.sh/ub-config.sh) wins; default is this tree's chrome-wrapper.sh.
+const WRAPPER = process.env.CHROME_PATH || join(HERE, 'chrome-wrapper.sh');
 const PROFILE = process.env.MUSE_ULTRA_PROFILE || join(HERE, 'profile');
 const HEADLESS = process.env.MUSE_ULTRA_HEADLESS !== '0';
 const EPHEMERAL = process.env.MUSE_ULTRA_EPHEMERAL === '1';
@@ -108,13 +111,16 @@ function onWsMessage(ev) {
 async function launchChrome() {
   // Fixed-ish port (never 0: Chrome reports navigator.webdriver=true on an
   // OS-assigned debugging port — same reasoning as ego-linux's launcher).
-  for (const p of [19222, 19223, 19224, 19225, 19226]) {
+  // MUSE_ULTRA_CDP_PORT pins the first candidate when set.
+  const pinned = Number(process.env.MUSE_ULTRA_CDP_PORT || 0);
+  const candidates = [...new Set([pinned, 19222, 19223, 19224, 19225, 19226].filter(Boolean))];
+  for (const p of candidates) {
     try {
       const r = await fetch(`http://127.0.0.1:${p}/json/version`);
       if (r.ok) throw new Error('busy');
     } catch (e) { if (e.message !== 'busy') { chromePort = p; break; } }
   }
-  if (!chromePort) chromePort = 19222;
+  if (!chromePort) chromePort = candidates[0];
   const args = [
     `--remote-debugging-port=${chromePort}`, '--remote-debugging-address=127.0.0.1',
     `--user-data-dir=${PROFILE}`,
@@ -144,6 +150,140 @@ function ensureChrome() {
     readyPromise = launchChrome().catch(e => { readyPromise = null; throw e; });
   }
   return readyPromise;
+}
+
+// ---------------------------------------------------------------- Input primitives
+// Transplanted 2026-11-26 from muse-desktop src/chromeControl.js (MIT,
+// mobiusbagel/muse-desktop): SNAPSHOT_SCRIPT, buildRectScript,
+// buildFocusScript, SPECIAL_KEYS + keyDefinition — verbatim except that the
+// snapshot's body-text field is dropped (read/snapshot already cover text)
+// and invalidParams() becomes a plain Error.
+const ELEMENT_ID_ATTR = 'data-muse-id';
+const MAX_SNAPSHOT_ELEMENTS = 300;
+const SNAPSHOT_SCRIPT = `(() => {
+  const ATTR = '${ELEMENT_ID_ATTR}';
+  document.querySelectorAll('[' + ATTR + ']').forEach((el) => el.removeAttribute(ATTR));
+  const SELECTOR = [
+    'a[href]', 'button', 'input', 'select', 'textarea', 'summary',
+    '[role="button"]', '[role="link"]', '[role="textbox"]',
+    '[role="checkbox"]', '[role="radio"]', '[role="tab"]',
+    '[contenteditable=""]', '[contenteditable="true"]',
+  ].join(',');
+  const out = [];
+  let n = 0;
+  let truncated = false;
+  for (const el of document.querySelectorAll(SELECTOR)) {
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') continue;
+    if (rect.width === 0 && rect.height === 0) continue;
+    n += 1;
+    if (n > ${MAX_SNAPSHOT_ELEMENTS}) { truncated = true; break; }
+    const id = 'e' + n;
+    el.setAttribute(ATTR, id);
+    const item = {
+      id,
+      kind: el.tagName.toLowerCase(),
+      x: Math.round(rect.x + rect.width / 2),
+      y: Math.round(rect.y + rect.height / 2),
+    };
+    const type = el.getAttribute('type');
+    if (type) item.type = type;
+    const text = (el.innerText || el.textContent || '').trim().replace(/\\s+/g, ' ').slice(0, 120);
+    if (text) item.text = text;
+    const label = el.getAttribute('aria-label');
+    if (label) item.label = label.slice(0, 120);
+    const placeholder = el.getAttribute('placeholder');
+    if (placeholder) item.placeholder = placeholder.slice(0, 120);
+    if (el.tagName === 'A' && el.href) item.href = el.href.slice(0, 300);
+    if ((el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') && type !== 'password') {
+      if (el.value) item.value = String(el.value).slice(0, 200);
+    }
+    if (el.tagName === 'SELECT' && el.value) item.value = String(el.value).slice(0, 200);
+    if ('checked' in el && (type === 'checkbox' || type === 'radio')) item.checked = Boolean(el.checked);
+    if (el.disabled) item.disabled = true;
+    out.push(item);
+  }
+  return { url: location.href, title: document.title, elements: out, truncated };
+})()`;
+
+function buildRectScript(ref) {
+  const lookup = ref.id
+    ? `document.querySelector('[${ELEMENT_ID_ATTR}="' + ${JSON.stringify(ref.id)} + '"]')`
+    : `document.querySelector(${JSON.stringify(ref.selector)})`;
+  return `(() => {
+    const el = ${lookup};
+    if (!el) return null;
+    el.scrollIntoViewIfNeeded ? el.scrollIntoViewIfNeeded() : el.scrollIntoView({ block: 'center' });
+    const rect = el.getBoundingClientRect();
+    return { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) };
+  })()`;
+}
+
+function buildFocusScript(ref) {
+  const lookup = ref.id
+    ? `document.querySelector('[${ELEMENT_ID_ATTR}="' + ${JSON.stringify(ref.id)} + '"]')`
+    : `document.querySelector(${JSON.stringify(ref.selector)})`;
+  return `(() => { const el = ${lookup}; if (!el) return false; el.focus(); return true; })()`;
+}
+
+const SPECIAL_KEYS = {
+  Enter: { key: 'Enter', code: 'Enter', vk: 13, text: '\r' },
+  Tab: { key: 'Tab', code: 'Tab', vk: 9 },
+  Escape: { key: 'Escape', code: 'Escape', vk: 27 },
+  Backspace: { key: 'Backspace', code: 'Backspace', vk: 8 },
+  Delete: { key: 'Delete', code: 'Delete', vk: 46 },
+  ArrowLeft: { key: 'ArrowLeft', code: 'ArrowLeft', vk: 37 },
+  ArrowUp: { key: 'ArrowUp', code: 'ArrowUp', vk: 38 },
+  ArrowRight: { key: 'ArrowRight', code: 'ArrowRight', vk: 39 },
+  ArrowDown: { key: 'ArrowDown', code: 'ArrowDown', vk: 40 },
+  Home: { key: 'Home', code: 'Home', vk: 36 },
+  End: { key: 'End', code: 'End', vk: 35 },
+  PageUp: { key: 'PageUp', code: 'PageUp', vk: 33 },
+  PageDown: { key: 'PageDown', code: 'PageDown', vk: 34 },
+  ' ': { key: ' ', code: 'Space', vk: 32, text: ' ' },
+  Space: { key: ' ', code: 'Space', vk: 32, text: ' ' },
+};
+
+function keyDefinition(name) {
+  if (SPECIAL_KEYS[name]) return SPECIAL_KEYS[name];
+  const fMatch = /^F([1-9]|1[0-2])$/.test(name);
+  if (fMatch) {
+    const n = Number(name.slice(1));
+    return { key: name, code: name, vk: 111 + n };
+  }
+  if (name.length === 1) {
+    const upper = name.toUpperCase();
+    const isLetter = upper >= 'A' && upper <= 'Z';
+    const isDigit = name >= '0' && name <= '9';
+    return {
+      key: name,
+      code: isLetter ? `Key${upper}` : isDigit ? `Digit${name}` : '',
+      vk: upper.charCodeAt(0),
+      text: name,
+    };
+  }
+  throw new Error(
+    `press: unsupported key "${name}". Use a special key (Enter, Tab, Escape, ` +
+      'Backspace, Delete, arrows, Home, End, PageUp, PageDown, Space, F1-F12) or a single character.',
+  );
+}
+
+// A ref is 'e3' (an id from elements()), a CSS selector string, or
+// {id} / {selector}.
+function parseRef(ref) {
+  if (ref && typeof ref === 'object') {
+    if (ref.id) return { id: String(ref.id) };
+    if (ref.selector) return { selector: String(ref.selector) };
+  }
+  if (typeof ref === 'string' && ref) {
+    return /^e\d+$/.test(ref) ? { id: ref } : { selector: ref };
+  }
+  throw new Error('ref must be an element id (e3), a CSS selector, or {id}/{selector}');
+}
+function refLabel(ref) {
+  const r = parseRef(ref);
+  return r.id ? 'element ' + r.id : 'selector ' + JSON.stringify(r.selector);
 }
 
 // ---------------------------------------------------------------- Page shim
@@ -223,6 +363,67 @@ class UBPage {
     };
     for (const n of nodes) if (!n.parentId) walk(n, 0);
     return lines.join('\n');
+  }
+  // --- Input primitives (transplanted from muse-desktop chromeControl) ---
+  // elements(): interactive-element snapshot with e-ids + center coords.
+  // Password inputs report type only, never a value.
+  async elements() {
+    const v = await this.evaluate(SNAPSHOT_SCRIPT);
+    if (!v || !Array.isArray(v.elements)) throw new Error('elements: page did not return a snapshot');
+    return v;
+  }
+  async rectOf(ref) {
+    const r = parseRef(ref);
+    const rect = await this.evaluate(buildRectScript(r));
+    if (!rect || typeof rect.x !== 'number' || typeof rect.y !== 'number') {
+      throw new Error('element_not_found: ' + refLabel(ref) + ' is not on the page anymore - take a fresh elements()');
+    }
+    return rect;
+  }
+  async click(ref) {
+    const rect = await this.rectOf(ref);
+    await this.cdp('Input.dispatchMouseEvent', { type: 'mousePressed', x: rect.x, y: rect.y, button: 'left', clickCount: 1 });
+    await this.cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', x: rect.x, y: rect.y, button: 'left', clickCount: 1 });
+    return { clicked: refLabel(ref), x: rect.x, y: rect.y };
+  }
+  async focus(ref) {
+    const r = parseRef(ref);
+    const ok = await this.evaluate(buildFocusScript(r));
+    if (!ok) throw new Error('element_not_found: ' + refLabel(ref) + ' is not on the page anymore - take a fresh elements()');
+    return { focused: refLabel(ref) };
+  }
+  async dispatchKey(def, modifiers, type) {
+    const ev = {
+      type, key: def.key, code: def.code,
+      windowsVirtualKeyCode: def.vk, nativeVirtualKeyCode: def.vk,
+      modifiers: modifiers || 0,
+    };
+    if (type === 'keyDown' && def.text && !((modifiers || 0) & 2) && !((modifiers || 0) & 4)) ev.text = def.text;
+    await this.cdp('Input.dispatchKeyEvent', ev);
+  }
+  async press(key, modifiers = 0) {
+    const def = keyDefinition(key);
+    await this.dispatchKey(def, modifiers, 'keyDown');
+    await this.dispatchKey(def, modifiers, 'keyUp');
+    return { pressed: key };
+  }
+  // type(ref, text, {clear:true}) focuses ref, optionally clears it
+  // (Ctrl+A + Backspace, as in chromeControl), then inserts text as real
+  // input via Input.insertText.
+  async type(ref, text, opts = {}) {
+    await this.focus(ref);
+    if (opts && opts.clear) {
+      await this.dispatchKey({ key: 'a', code: 'KeyA', vk: 65 }, 2, 'keyDown');
+      await this.dispatchKey({ key: 'a', code: 'KeyA', vk: 65 }, 2, 'keyUp');
+      await this.dispatchKey(SPECIAL_KEYS.Backspace, 0, 'keyDown');
+      await this.dispatchKey(SPECIAL_KEYS.Backspace, 0, 'keyUp');
+    }
+    await this.cdp('Input.insertText', { text: String(text) });
+    return { typed: refLabel(ref), chars: String(text).length };
+  }
+  async typeText(text) {
+    await this.cdp('Input.insertText', { text: String(text) });
+    return { chars: String(text).length };
   }
   async screenshot() {
     const r = await this.cdp('Page.captureScreenshot', { format: 'png' });

@@ -8,7 +8,11 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 URL="${1:?usage: fetch.sh <url>}"
-PROXY="${UB_PROXY:-http://hatch-egress-proxy:3128}"
+# Proxy comes from configuration (ub-config.sh): UB_PROXY > MUSE_ULTRA_PROXY
+# (config.env) > HTTPS_PROXY env > empty = direct connection. No proxy
+# address is baked into this script.
+. "$HERE/ub-config.sh"
+PROXY="$UB_PROXY"
 UA='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/159.0.0.0 Safari/537.36'
 MAXTIME="${L0_TIMEOUT:-20}"
 MINCHARS="${L0_MINCHARS:-100}"
@@ -23,7 +27,9 @@ HTML=$(mktemp /tmp/meta-muse-ultra-l0-XXXXXX.html)
 TXT=$(mktemp /tmp/meta-muse-ultra-l0-XXXXXX.txt)
 trap 'rm -f "$HTML" "$TXT"' EXIT
 
-HTTP=$(curl -sS -x "$PROXY" -A "$UA" -L --max-time "$MAXTIME" \
+CURL_PROXY=()
+[ -n "$PROXY" ] && CURL_PROXY=(-x "$PROXY")
+HTTP=$(curl -sS "${CURL_PROXY[@]}" -A "$UA" -L --max-time "$MAXTIME" \
   -o "$HTML" -w '%{http_code}' "$URL" 2>/tmp/meta-muse-ultra-l0-curl.err)
 RC=$?
 if [ $RC -ne 0 ]; then

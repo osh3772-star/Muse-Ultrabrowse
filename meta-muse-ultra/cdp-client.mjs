@@ -12,7 +12,7 @@ import { existsSync, mkdirSync, openSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
-const STATE_DIR = join(homedir(), '.local', 'share', 'muse-ultra-browser');
+const STATE_DIR = process.env.MUSE_ULTRA_STATE_DIR || join(homedir(), '.local', 'share', 'muse-ultra-browser');
 const SOCK = join(STATE_DIR, 'cdp-daemon.sock');
 const HERE = new URL('.', import.meta.url).pathname;
 const DAEMON = join(HERE, 'cdp-daemon.mjs');
