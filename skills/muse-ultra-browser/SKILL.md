@@ -105,6 +105,13 @@ Runtime.evaluate와 교착한다 (상세: `~/workspace/ultra-harness-2026-11-26.
 - 비교 키는 backendDOMNodeId(없으면 트리 경로)라, 같은 페이지의 연속 스냅샷에서만 의미가 있다. 페이지가 통째로 바뀌면 diff가 아니라 전체 스냅샷을 새로 받아라.
 - 옵션이 없는 `p.snapshot()`과 run.sh의 호출(`{scope:"full_page"}` 포함)은 종전과 동일하게 동작한다.
 
+**이벤트 신호 + 다운로드 (2026-11-27 신설, Aside 이식 ②)**: `-f` 스크립트에서 쓰는 비동기 신호·다운로드 프리미티브. 지금까지는 팝업·다운로드·탭 닫힘을 스크립트가 폴링으로 발견해야 했는데, 데몬이 선별해 신호로 준다.
+- `await p.drainEvents()` — 지난 drain 이후의 신호를 시간순 배열로: `{kind:'popup', targetId, url}`(페이지가 window.open/target=_blank로 연 팝업 탭), `{kind:'tab_closed', targetId}`(팝업 또는 우리 페이지 소멸), `{kind:'dialog', dialogType, message}`(이 페이지의 JS 다이얼로그 — `Page.handleJavaScriptDialog`로 처리하기 전까지 페이지가 멈춰 있다), `{kind:'download_started'|'download_completed'|'download_canceled', guid, url, filename, state, received, total}`. 원시 CDP 스트림은 기존 `p.events()`가 그대로 담당한다.
+- `await p.waitForEvent(kind, {timeoutMs=15000})` — 해당 kind의 첫 신호, 시간 초과면 null. 단 기다리는 동안 지나간 다른 신호도 함께 소비(drain)되니, 스트림 전체가 필요하면 `drainEvents()`를 써라.
+- `p.downloads()` — 데몬이 본 다운로드 전체 목록 `{guid, url, filename, state, received, total, startedAt}`.
+- `await p.waitForDownload({timeoutMs=30000, filename?, url?})` — 완료: `{completed:true, path, bytes, filename, url, guid}` (path는 상태 디렉터리 `~/.local/share/muse-ultra-browser/downloads/` 아래 파일, bytes는 디스크 실측 크기). 취소: `{completed:false, state:'canceled', …}`, 시간 초과: `{completed:false, state:'timeout', pending:[…]}` — 예외가 아니라 보고 객체를 돌려주니 호출자가 다음 행동을 정한다. 다운로드 동작(allow+저장 경로)은 첫 페이지가 생길 때 데몬 전역으로 무장되므로, 클릭으로 시작된 다운로드도 나중에 `waitForDownload`로 회수할 수 있고, 호출 5초 전까지 시작된 것도 매칭된다.
+- 검증 (2026-11-27): data: 테스트 페이지에서 window.open 팝업 신호 포착, data: 다운로드 completed·26바이트·디스크 내용 일치, drain에 started/completed 수신 — 백업 `meta-muse-ultra/backup-aside-step2-2026-11-27/`.
+
 **챌린지 감지+대기 (2026-11-27 신설)**: `-f` 스크립트에서 `await p.challenge(opts)` — ego lite의 `task.handleChallenge()`를 본뜬 **감지+대기 전용** 프리미티브. 챌린지를 클릭·풀이하지 않는다.
 - 반환: `{detected, type, passed, waitedMs, url}`. `type`은 `turnstile`/`hcaptcha`/`recaptcha-v2`/`recaptcha-v3`/`cloudflare-challenge`/`generic`/null. `passed`는 토큰 생성·위젯 소멸·(인터스티셜) 통과 이동이면 true, 미해결이면 false, recaptcha-v3(점수 기반, 관찰 불가)는 null.
 - 옵션: `timeoutMs`(기본 30000, 전체 상한), `pollMs`(기본 500), `appearMs`(기본 3000, 위젯 등장 유예), `wait:false`면 1회 탐지만.

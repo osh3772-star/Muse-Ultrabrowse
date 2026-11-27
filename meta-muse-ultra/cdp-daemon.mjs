@@ -15,6 +15,9 @@
 //   page (challenge, 2026-11-27): challenge()
 //   page (snapshot diff, 2026-11-27): snapshot({diff:true}) — Aside
 //     transplant step 1 of 5; see skill-dev-2026-11-27/aside-analysis/NOTE.md
+//   page (event signals + downloads, 2026-11-27): drainEvents(),
+//     waitForEvent(), downloads(), waitForDownload() — Aside transplant
+//     step 2 of 5; same NOTE.md
 // Scripts run IN THIS PROCESS (AsyncFunction), so they see this daemon's
 // environment — identical semantics to the old harness (agent-vault relies
 // on the daemon-start environment, e.g. AGENT_VAULT_VALUE).
@@ -25,7 +28,7 @@
 //   -> {type:"stop"}               <- {type:"done", code:0} then daemon exits
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdirSync, writeFileSync, rmSync, openSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync, openSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import util from 'node:util';
@@ -52,7 +55,62 @@ let ws = null;
 let readyPromise = null;
 let nextId = 1;
 const pending = new Map();          // id -> {res, rej}
-const sessions = new Map();         // sessionId -> {targetId, events: [], loadWaiters: []}
+const sessions = new Map();         // sessionId -> {targetId, events: [], loadWaiters: [], signals: []}
+
+// --- Async event signals + downloads (2026-11-27, Aside transplant ②) ---
+// Aside's harness pushes popup/download/tab-close signals to the agent
+// instead of letting it discover them by polling. Browser-level Target
+// events carry no sessionId; downloads arrive as Browser.* (browser
+// level, because Browser.setDownloadBehavior runs with
+// eventsEnabled:true) and/or Page.* (session level) — both feed the
+// same registry, deduplicated by guid + state transition.
+const DL_DIR = join(STATE_DIR, 'downloads'); // completed downloads land here
+const browserSignals = [];          // {t, kind:'popup'|'tab_closed', targetId, url}
+const popupTargets = new Set();     // targetIds a page opened (openerId set)
+const downloads = new Map();        // guid -> download record
+const downloadLog = [];             // ordered lifecycle entries for drainEvents()
+let dlBehaviorSet = false;
+function pushCapped(arr, item, cap) {
+  arr.push(item);
+  if (arr.length > cap) arr.splice(0, arr.length - cap);
+}
+function noteDownload(kind, rec) {
+  pushCapped(downloadLog, { t: Date.now(), kind, ...rec }, 500);
+}
+function noteDownloadEvent(method, p, sessionId) {
+  const guid = p.guid || '';
+  if (!guid) return;
+  if (method.endsWith('downloadWillBegin')) {
+    if (downloads.has(guid)) return; // Browser.* and Page.* can both report it
+    const rec = { guid, url: p.url || '', filename: p.suggestedFilename || '', state: 'inProgress', received: 0, total: -1, sessionId: sessionId || null, startedAt: Date.now() };
+    downloads.set(guid, rec);
+    noteDownload('download_started', { ...rec });
+  } else if (method.endsWith('downloadProgress')) {
+    const rec = downloads.get(guid) || { guid, url: '', filename: '', state: '', received: 0, total: -1, sessionId: sessionId || null, startedAt: Date.now() };
+    const prevState = rec.state;
+    rec.state = p.state || rec.state;
+    if (p.receivedBytes !== undefined) rec.received = p.receivedBytes;
+    if (p.totalBytes !== undefined) rec.total = p.totalBytes;
+    downloads.set(guid, rec);
+    if (rec.state === 'completed' && prevState !== 'completed') noteDownload('download_completed', { ...rec });
+    else if (rec.state === 'canceled' && prevState !== 'canceled') noteDownload('download_canceled', { ...rec });
+  }
+}
+function resolveDownloadPath(filename) {
+  if (!filename) return null;
+  const direct = join(DL_DIR, filename);
+  if (existsSync(direct)) return direct;
+  // Chrome uniquifies collisions as "name (1).ext" — take the newest match.
+  try {
+    const m = /^(.*?)(\.[^.]+)?$/.exec(filename);
+    const base = m[1], ext = m[2] || '';
+    const cands = readdirSync(DL_DIR)
+      .filter(f => f.startsWith(base + ' (') && f.endsWith(')' + ext))
+      .map(f => ({ f, mt: statSync(join(DL_DIR, f)).mtimeMs }))
+      .sort((a, b) => b.mt - a.mt);
+    return cands.length ? join(DL_DIR, cands[0].f) : null;
+  } catch { return null; }
+}
 
 const DEBUG = process.env.UB_CDP_DEBUG === '1';
 const dbg = (...a) => { if (DEBUG) try { writeFileSync(join(STATE_DIR, 'cdp-debug.log'), a.join(' ') + '\n', { flag: 'a' }); } catch {} };
@@ -77,6 +135,29 @@ function onWsMessage(ev) {
     return;
   }
   dbg(Date.now(), 'EVT', m.method || '?', m.sessionId || '-');
+  if (m.method && !m.sessionId) {
+    // Browser-level events (no sessionId): popup targets, tab closes,
+    // browser-level download lifecycle.
+    if (m.method === 'Target.targetCreated') {
+      const ti = (m.params && m.params.targetInfo) || {};
+      // Only targets a PAGE opened (openerId set) count as popups —
+      // targets we create ourselves via Target.createTarget are our
+      // own pages, and Chrome's initial about:blank has no opener.
+      if (ti.type === 'page' && ti.openerId) {
+        popupTargets.add(ti.targetId);
+        pushCapped(browserSignals, { t: Date.now(), kind: 'popup', targetId: ti.targetId, url: ti.url || '' }, 500);
+      }
+    } else if (m.method === 'Target.targetDestroyed') {
+      const tid = m.params && m.params.targetId;
+      const wasPopup = tid && popupTargets.delete(tid);
+      const wasOurs = tid && [...sessions.values()].some(s => s.targetId === tid);
+      if (tid && (wasPopup || wasOurs)) {
+        pushCapped(browserSignals, { t: Date.now(), kind: 'tab_closed', targetId: tid, url: '' }, 500);
+      }
+    } else if (m.method === 'Browser.downloadWillBegin' || m.method === 'Browser.downloadProgress') {
+      noteDownloadEvent(m.method, m.params || {}, null);
+    }
+  }
   if (m.method && m.sessionId && sessions.has(m.sessionId)) {
     const s = sessions.get(m.sessionId);
     // Armed Fetch policy: answer requestPaused IMMEDIATELY here in the event
@@ -101,6 +182,18 @@ function onWsMessage(ev) {
       } else {
         cdpSend('Fetch.failRequest', { requestId: p.requestId, errorReason: 'BlockedByClient' }, m.sessionId).catch(() => {});
       }
+    }
+    // Curated session signals for drainEvents(): JS dialogs (a dialog
+    // blocks the page until handled, so scripts need to know) and the
+    // session-level download lifecycle. Popup/tab-close signals come
+    // from the browser-level Target branch above — Page.windowOpen is
+    // deliberately NOT mirrored here, it would double-report every
+    // popup (each window.open also creates a target).
+    if (m.method === 'Page.javascriptDialogOpening' && s.signals) {
+      s.signals.push({ t: Date.now(), kind: 'dialog', dialogType: (m.params && m.params.type) || '', message: (m.params && m.params.message) || '' });
+    }
+    if (m.method === 'Page.downloadWillBegin' || m.method === 'Page.downloadProgress') {
+      noteDownloadEvent(m.method, m.params || {}, m.sessionId);
     }
     s.events.push({ method: m.method, params: m.params });
     if (s.events.length > 10000) s.events.splice(0, s.events.length - 10000);
@@ -135,7 +228,11 @@ async function launchChrome() {
   ];
   const logFd = openSync(join(STATE_DIR, 'cdp-chrome.log'), 'a');
   chromeProc = spawn(WRAPPER, args, { stdio: ['ignore', logFd, logFd], env: process.env });
-  chromeProc.on('exit', () => { chromeProc = null; ws = null; readyPromise = null; sessions.clear(); spaces.clear(); });
+  chromeProc.on('exit', () => {
+    chromeProc = null; ws = null; readyPromise = null; sessions.clear(); spaces.clear();
+    dlBehaviorSet = false; downloads.clear(); downloadLog.length = 0;
+    browserSignals.length = 0; popupTargets.clear();
+  });
   // Wait for the DevTools endpoint, then connect the browser-level socket.
   let ver = null;
   for (let i = 0; i < 80 && !ver; i++) {
@@ -146,6 +243,9 @@ async function launchChrome() {
   ws = new WebSocket(ver.webSocketDebuggerUrl);
   await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
   ws.onmessage = onWsMessage;
+  // Discover targets so popup tabs (window.open / target=_blank) surface
+  // as Target.targetCreated signals (see drainEvents()).
+  try { await cdpSend('Target.setDiscoverTargets', { discover: true }); } catch {}
 }
 
 function ensureChrome() {
@@ -363,6 +463,8 @@ class UBPage {
   constructor(space, targetId, sessionId, label) {
     this.space = space; this.targetId = targetId; this.sessionId = sessionId; this.label = label;
     this._lastSnap = null;  // Map key -> rendered line, for snapshot({diff:true})
+    this._sigCursor = 0;    // drainEvents() cursor into browserSignals
+    this._dlCursor = 0;     // drainEvents() cursor into downloadLog
   }
   async cdp(method, params = {}) { return cdpSend(method, params, this.sessionId); }
   // armFetch(policy, fallback): policy({url, method, resourceType, requestId})
@@ -618,6 +720,111 @@ class UBPage {
       }
     }
   }
+  // --- Async event signals (2026-11-27, Aside transplant ②) ---
+  // drainEvents(): curated async signals since THIS page's last drain,
+  // merged in time order:
+  //   {kind:'popup', targetId, url, via:'target'}        — a page opened
+  //     a popup tab (browser-level Target.targetCreated, openerId set)
+  //   {kind:'tab_closed', targetId, via:'target'}        — a popup tab
+  //     or one of our own pages was destroyed
+  //   {kind:'dialog', dialogType, message}               — a JS dialog
+  //     opened on this page (it blocks until handled via Page.* CDP)
+  //   {kind:'download_started'|'download_completed'|'download_canceled',
+  //     guid, url, filename, state, received, total}     — download
+  //     lifecycle; browser-level entries (no session) are reported to
+  //     every page, session entries only to their owning page
+  // The raw CDP stream stays available via events(); this is the
+  // semantic layer on top (Aside's harness reports popup/download/
+  // tab-close to the agent instead of making it poll for them).
+  async drainEvents() {
+    const out = [];
+    const s = sessions.get(this.sessionId);
+    if (s && s.signals) out.push(...s.signals.splice(0));
+    for (let i = this._sigCursor; i < browserSignals.length; i++) {
+      const sig = browserSignals[i];
+      out.push({ t: sig.t, kind: sig.kind, targetId: sig.targetId, url: sig.url, via: 'target' });
+    }
+    this._sigCursor = browserSignals.length;
+    for (let i = this._dlCursor; i < downloadLog.length; i++) {
+      const d = downloadLog[i];
+      if (!d.sessionId || d.sessionId === this.sessionId) {
+        out.push({ t: d.t, kind: d.kind, guid: d.guid, url: d.url, filename: d.filename, state: d.state, received: d.received, total: d.total });
+      }
+    }
+    this._dlCursor = downloadLog.length;
+    out.sort((a, b) => (a.t || 0) - (b.t || 0));
+    return out;
+  }
+  // waitForEvent(kind, {timeoutMs=15000}) -> the first drained signal
+  // of that kind, or null on timeout. NOTE: it drains — signals of
+  // other kinds seen while waiting are consumed. Use drainEvents()
+  // when you need the whole stream.
+  async waitForEvent(kind, opts = {}) {
+    const timeoutMs = Math.max(0, Number(opts.timeoutMs ?? 15000));
+    const started = Date.now();
+    for (;;) {
+      const evs = await this.drainEvents();
+      const hit = evs.find(e => e.kind === kind);
+      if (hit) return hit;
+      if (Date.now() - started >= timeoutMs) return null;
+      await new Promise(r => setTimeout(r, 200));
+    }
+  }
+  // --- Downloads (2026-11-27, Aside transplant ②) ---
+  // Download behavior is armed once per daemon (allow + the state
+  // downloads dir) from newPage, so a click that starts a download is
+  // recorded even if waitForDownload() is only called afterwards.
+  async _ensureDownloadBehavior() {
+    if (dlBehaviorSet) return;
+    dlBehaviorSet = true; // optimistic: blocks re-entry while the CDP call is in flight
+    try {
+      mkdirSync(DL_DIR, { recursive: true });
+      await cdpSend('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: DL_DIR, eventsEnabled: true });
+    } catch (e) { dlBehaviorSet = false; throw e; }
+  }
+  // downloads(): every download this daemon has seen, oldest first.
+  downloads() {
+    return [...downloads.values()].map(d => ({
+      guid: d.guid, url: d.url, filename: d.filename, state: d.state,
+      received: d.received, total: d.total, startedAt: d.startedAt,
+    }));
+  }
+  // waitForDownload({timeoutMs=30000, filename?, url?}):
+  //   completed -> {completed:true, path, bytes, filename, url, guid, state}
+  //     (path = file under the state downloads dir; bytes = on-disk size)
+  //   canceled  -> {completed:false, state:'canceled', filename, url, guid}
+  //   timeout   -> {completed:false, state:'timeout', pending:[...]}
+  // A report object instead of an exception, so the caller decides
+  // what to do next. Downloads that began up to 5s before the call
+  // count (the usual click-then-wait pattern).
+  async waitForDownload(opts = {}) {
+    await this._ensureDownloadBehavior();
+    const timeoutMs = Math.max(0, Number(opts.timeoutMs ?? 30000));
+    const started = Date.now();
+    const match = (d) => (!opts.filename || d.filename === opts.filename)
+      && (!opts.url || d.url === opts.url)
+      && d.startedAt >= started - 5000;
+    for (;;) {
+      for (const d of downloads.values()) {
+        if (!match(d)) continue;
+        if (d.state === 'completed') {
+          const path = resolveDownloadPath(d.filename);
+          let bytes = d.received || 0;
+          if (path) { try { bytes = statSync(path).size; } catch {} }
+          return { completed: true, guid: d.guid, url: d.url, filename: d.filename, path, bytes, state: d.state };
+        }
+        if (d.state === 'canceled') {
+          return { completed: false, guid: d.guid, url: d.url, filename: d.filename, state: 'canceled' };
+        }
+      }
+      if (Date.now() - started >= timeoutMs) {
+        const pending = [...downloads.values()].filter(match)
+          .map(d => ({ guid: d.guid, filename: d.filename, state: d.state, received: d.received, total: d.total }));
+        return { completed: false, state: 'timeout', pending };
+      }
+      await new Promise(r => setTimeout(r, 250));
+    }
+  }
   async screenshot() {
     const r = await this.cdp('Page.captureScreenshot', { format: 'png' });
     return r.data;
@@ -647,10 +854,13 @@ class UBSpace {
       url: 'about:blank', ...(this.contextId ? { browserContextId: this.contextId } : {}),
     });
     const { sessionId } = await cdpSend('Target.attachToTarget', { targetId, flatten: true });
-    sessions.set(sessionId, { targetId, events: [], loadWaiters: [] });
+    sessions.set(sessionId, { targetId, events: [], loadWaiters: [], signals: [] });
     const page = new UBPage(this, targetId, sessionId, label || ('p' + (++this.pageSeq)));
     this.pages.set(page.label, page);
     try { await page.cdp('Page.enable', {}); } catch {}
+    // Arm download capture daemon-wide from the first page, so a click
+    // that starts a download is recorded even before waitForDownload().
+    try { await page._ensureDownloadBehavior(); } catch {}
     return page;
   }
   async page(label) {
