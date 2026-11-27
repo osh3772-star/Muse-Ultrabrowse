@@ -43,7 +43,7 @@ python3 ~/workspace/agent-vault/vault.py store <이름> --purpose "<용도>" < <
 2. 사용자는 비밀번호 열만 채워 파일을 돌려준다. 채팅 본문에 값을 적게 하지 않는다.
 3. `intake.sh apply <폼> [--copy <사본>]` — 채워진 행만 `vault.py store`의 표준입력으로 저장하고, 성공한 행은 폼에서 즉시 값을 비우며, 전부 성공하면 폼과 사본을 파쇄·삭제한다. 보고는 행마다 `ok site=… cleared=yes`, 실패 행은 폼에 남아 재시도할 수 있다.
 
-**시트 경로(A) 절차** (커넥터 연결 시에만): `sheet-intake.py setup --spec spec.tsv`가 비공개 스프레드시트(탭 `in`)를 만들고 아이디까지 채워둔다. 사용자는 비밀번호 열만 채우고, `sheet-intake.py apply`가 저장된 행의 비밀번호 셀만 지운다. 모든 하위 명령은 실행 전 커넥터 상태를 확인하고, 미연결이면 아무것도 바꾸지 않고 `fallback=file reason=sheets-not-connected`로 빠져 파일 경로로 내려간다.
+**시트 경로(A) 절차** (커넥터 연결 시에만): `sheet-intake.py setup --spec spec.tsv`가 비공개 스프레드시트(탭 `in`)를 만들고 아이디까지 채워둔다. spec의 사이트·아이디는 볼트 목록(`list`)의 이름·용도와 로그인 대상에서 에이전트가 채운다. 사용자가 이미 만든 시트 링크를 건네면 `--sheet-id <링크>`로 그 시트를 채택할 수도 있다. 사용자는 비밀번호 열만 채우고, `sheet-intake.py apply`가 저장된 행의 비밀번호 셀만 지운다. 모든 하위 명령은 실행 전 커넥터 상태를 확인하고, 미연결이면 아무것도 바꾸지 않고 `fallback=file reason=sheets-not-connected`로 빠져 파일 경로로 내려간다.
 
 어느 경로든 값은 표준입력으로만 볼트에 들어가고, 출력·로그·명령행 인자 어디에도 남지 않는다.
 

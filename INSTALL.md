@@ -95,7 +95,20 @@ cd ~/workspace/muse-ultra-browser-build/meta-muse-ultra
 `read` 출력 끝에 `%%CHAIN%% lane=L1 mode=read status=ok ...` 결과 줄이
 붙고 종료 코드가 0이면 성공이다.
 
-### 8. 결과 보고
+### 8. 자격증명 인입 세팅
+
+로그인 값을 채팅으로 받지 않기 위한 인입 경로를 설치와 한 세트로 세팅한다.
+
+```bash
+cd ~/workspace/muse-ultra-browser-build/meta-muse-ultra/intake
+./intake.sh setup
+```
+
+- 판정은 시트 우선 → 파일 폴백이다. 시트 커넥터(`hatch_gws_cli sheets status`)가 `connected`면 비공개 구글 시트 경로(A), 아니면 파일 왕복 경로(B)로 기록된다. 미연결이면 시트 경로는 가드로 막혀 동작하지 않는다.
+- 판정 결과는 상태 디렉터리의 `intake.json`에 남는다 (비밀값 없음). `./intake.sh path`로 확인할 수 있다.
+- 볼트 초기화(`vault.py init`)가 안 돼 있으면 이 단계에서 함께 한다. 실제 폼·시트 행은 로그인이 필요한 사이트가 정해질 때 spec으로 만든다 — 절차 상세는 agent-vault 스킬의 "폼 기반 인입" 절과 `intake/README.md`를 따른다.
+
+### 9. 결과 보고
 
 사용자에게 다음을 보고한다: doctor 결과(PASS/FAIL/SKIP 항목), 위 read
 테스트의 `%%CHAIN%%` 결과 줄, 설치 경로

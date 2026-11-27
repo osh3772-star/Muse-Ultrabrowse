@@ -116,7 +116,24 @@ def cmd_setup(args):
         header, rows = ic.read_table(args.spec, fmt)
         spec_rows = ic.as_dicts(header, rows, ic.SPEC_COLUMNS)
 
-    if cfg.get("sheet_id"):
+    adopt = None
+    if args.sheet_id:
+        adopt = args.sheet_id
+        if "spreadsheets/d/" in adopt:
+            adopt = adopt.split("spreadsheets/d/")[1].split("/")[0]
+    if adopt:
+        sheet_id = adopt
+        sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}"
+        cfg.update({"path": "A", "sheet_id": sheet_id, "sheet_url": sheet_url, "tab": TAB})
+        ic.save_intake_config(cfg)
+        out = run_gws(["+read", "--spreadsheet", sheet_id, "--range", f"{TAB}!A1:E1"])
+        body = unwrap(out or {})
+        if not body.get("values"):
+            run_gws(["+append", "--spreadsheet", sheet_id,
+                     "--json-values", json.dumps([ic.FORM_COLUMNS])])
+        print(f"sheet adopted id={sheet_id}")
+        print(f"sheet_url={sheet_url}")
+    elif cfg.get("sheet_id"):
         sheet_id, sheet_url = cfg["sheet_id"], cfg.get("sheet_url", "")
         print(f"sheet reused id={sheet_id}")
     else:
@@ -226,6 +243,7 @@ def main():
     s = sub.add_parser("setup")
     s.add_argument("--spec", help="spec table with rows to pre-fill")
     s.add_argument("--title", help="spreadsheet title")
+    s.add_argument("--sheet-id", help="adopt an existing spreadsheet (id or URL) instead of creating one")
     a = sub.add_parser("apply")
     a.add_argument("--vault-py")
     a.add_argument("--force", action="store_true")
