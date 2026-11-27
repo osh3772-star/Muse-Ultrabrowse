@@ -20,6 +20,9 @@
 //     step 2 of 5; same NOTE.md
 //   page (snapshot scoping, 2026-11-27): snapshot({ref|selector,
 //     interactiveOnly}) — Aside transplant step 3 of 5; same NOTE.md
+//   page (a11y states + session fetch + pdf/annotated screenshot,
+//     2026-11-27): snapshot state tokens; fetchInPage(), apiFallback(),
+//     pdf(), annotatedScreenshot() — Aside transplant step 5 of 5
 // Scripts run IN THIS PROCESS (AsyncFunction), so they see this daemon's
 // environment — identical semantics to the old harness (agent-vault relies
 // on the daemon-start environment, e.g. AGENT_VAULT_VALUE).
@@ -267,11 +270,19 @@ const ELEMENT_ID_ATTR = 'data-muse-id';
 const MAX_SNAPSHOT_ELEMENTS = 300;
 // AX roles treated as interactive for snapshot({interactiveOnly:true})
 // (2026-11-27, Aside transplant step 3 — the role list from cskwork's
-// aside-browser-skill snapshot options).
+// aside-browser-skill snapshot options) and for the [clickable] state
+// annotation (step 5: Aside's a11y tree annotates focus/clickable/iframe
+// states; the state tokens ride INSIDE the existing single [..] bracket
+// so snaptrim's line grammar — role "name" [one bracket group] — keeps
+// parsing).
 const AX_INTERACTIVE_ROLES = new Set([
   'button', 'link', 'checkbox', 'radio', 'tab', 'menuitem', 'menuitemcheckbox',
   'menuitemradio', 'option', 'switch', 'textbox', 'searchbox', 'combobox',
   'listbox', 'slider', 'spinbutton', 'treeitem', 'gridcell',
+]);
+const AX_CLICKABLE_ROLES = new Set([
+  'button', 'link', 'checkbox', 'radio', 'tab', 'menuitem', 'menuitemcheckbox',
+  'menuitemradio', 'option', 'switch', 'treeitem', 'gridcell',
 ]);
 const SNAPSHOT_SCRIPT = `(() => {
   const ATTR = '${ELEMENT_ID_ATTR}';
@@ -521,16 +532,23 @@ class UBPage {
   }
   // --- Snapshot core (2026-11-27: structured entries, for diff) ---
   // _axEntries() flattens the AX tree into entries {depth, role, name,
-  // backendId, key}. The walk mirrors the historical text walk exactly
-  // (ignored nodes emit no line and add no depth; InlineTextBox dropped —
-  // per-character fragments of a parent StaticText that bloat the
-  // snapshot ~10x and leak into snaptrim's text mode). key is the
+  // backendId, key, states[]}. The walk mirrors the historical text walk
+  // exactly (ignored nodes emit no line and add no depth; InlineTextBox
+  // dropped — per-character fragments of a parent StaticText that bloat
+  // the snapshot ~10x and leak into snaptrim's text mode). key is the
   // backendDOMNodeId when present, else the child-index path — stable
-  // enough across two snapshots of the same page for diffing.
+  // enough across two snapshots of the same page for diffing. states[]
+  // carries the a11y state annotations (2026-11-27, Aside transplant
+  // step 5): iframe / focused / disabled / checked / selected /
+  // expanded / collapsed / clickable (clickable role or AX focusable).
   async _axEntries() {
     const { nodes } = await this.cdp('Accessibility.getFullAXTree', {});
     const byId = new Map(nodes.map(n => [n.nodeId, n]));
     const entries = [];
+    const prop = (node, name) => {
+      for (const p of node.properties || []) if (p.name === name) return p.value ? p.value.value : undefined;
+      return undefined;
+    };
     const walk = (node, depth, path) => {
       if (!node) return;
       const role = (node.role && node.role.value) || 'generic';
@@ -538,10 +556,25 @@ class UBPage {
       const name = node.name ? node.name.value : '';
       let d = depth;
       if (!node.ignored || depth === 0) {
+        const states = [];
+        if (role === 'Iframe') states.push('iframe');
+        if (prop(node, 'focused') === true) states.push('focused');
+        if (prop(node, 'disabled') === true) states.push('disabled');
+        const checked = prop(node, 'checked');
+        // AX 'checked' is a tristate value: boolean true or the
+        // strings 'true'/'false'/'mixed' depending on the node.
+        if (checked === true || checked === 'true') states.push('checked');
+        else if (checked === 'mixed') states.push('checked=mixed');
+        if (prop(node, 'selected') === true) states.push('selected');
+        const expanded = prop(node, 'expanded');
+        if (expanded === true) states.push('expanded');
+        else if (expanded === false) states.push('collapsed');
+        if (AX_CLICKABLE_ROLES.has(role) || prop(node, 'focusable') === true) states.push('clickable');
         entries.push({
           depth, role, name,
           backendId: node.backendDOMNodeId || null,
           key: node.backendDOMNodeId ? 'b' + node.backendDOMNodeId : 'p' + path,
+          states,
         });
         d = depth + 1;
       }
@@ -554,7 +587,12 @@ class UBPage {
     const esc = s => String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
     let line = '  '.repeat(e.depth) + e.role;
     if (e.name) line += ' "' + esc(e.name) + '"';
-    if (e.backendId) line += ' [ref=' + e.backendId + ']';
+    // State tokens ride INSIDE the single bracket group (with ref=) so
+    // snaptrim's line grammar keeps matching — see the AX_* comment.
+    const bracket = [];
+    if (e.backendId) bracket.push('ref=' + e.backendId);
+    bracket.push(...e.states);
+    if (bracket.length) line += ' [' + bracket.join(' ') + ']';
     return line;
   }
   // _subtreeEntries(entries, backendId): the entry for backendId plus
@@ -619,6 +657,9 @@ class UBPage {
   //   scope root renders at depth 0. (③)
   //   interactiveOnly: true — keep only interactive-role lines
   //   (indentation preserved). (③)
+  // Lines carry a11y state tokens (iframe/focused/disabled/checked/
+  // selected/expanded/collapsed/clickable) inside the [..] bracket,
+  // after ref= when present. (⑤)
   // Baseline rule (③ design decision): baselines are kept PER SCOPE —
   // the unscoped baseline (key '') plus one per resolved scope target
   // (+interactiveOnly). Scoped/filtered calls only ever read and
@@ -910,6 +951,129 @@ class UBPage {
         return { completed: false, state: 'timeout', pending };
       }
       await new Promise(r => setTimeout(r, 250));
+    }
+  }
+  // --- Session fetch + bounded API fallback (2026-11-27, Aside ⑤) ---
+  // fetchInPage(pathOrUrl, opts): fetch from INSIDE the page, so the
+  // request carries the page's session (cookies) — the route for
+  // recovering files/data that L0 fetch.sh (no browser cookies) cannot
+  // reach (cskwork's cookie-carrying fetch). SAME-ORIGIN ONLY: the URL
+  // resolves against the page URL and cross-origin targets are refused
+  // before any request is made.
+  // opts: { method='GET', headers, save, name, json }
+  // Text/JSON returns inline (100k cap, truncated flag); binary or
+  // save:true is written under the state downloads dir -> {savedTo,bytes}.
+  async fetchInPage(pathOrUrl, opts = {}) {
+    const method = String(opts.method || 'GET').toUpperCase();
+    const r = await this.evaluate(async (a) => {
+      const u = new URL(a.url, location.href);
+      if (u.origin !== location.origin) {
+        throw new Error('fetchInPage: cross-origin refused (' + u.origin + ' !== ' + location.origin + ') — same-origin only');
+      }
+      const resp = await fetch(u.href, { method: a.method, credentials: 'same-origin', headers: a.headers || {} });
+      const ct = resp.headers.get('content-type') || '';
+      const textual = /text|json|xml|html|javascript/.test(ct);
+      if (!a.save && textual) {
+        return { status: resp.status, url: resp.url, contentType: ct, text: await resp.text() };
+      }
+      const buf = await resp.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let bin = '';
+      const CH = 0x8000;
+      for (let i = 0; i < bytes.length; i += CH) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+      return { status: resp.status, url: resp.url, contentType: ct, base64: btoa(bin) };
+    }, { url: String(pathOrUrl), method, headers: opts.headers || {}, save: !!opts.save });
+    if (!r) throw new Error('fetchInPage: page did not return a result');
+    const out = { status: r.status, url: r.url, contentType: r.contentType };
+    if (r.base64 !== undefined) {
+      const buf = Buffer.from(r.base64, 'base64');
+      mkdirSync(DL_DIR, { recursive: true });
+      let name = opts.name || '';
+      if (!name) { try { name = decodeURIComponent(new URL(r.url).pathname.split('/').filter(Boolean).pop() || ''); } catch {} }
+      if (!name) name = 'fetch-' + Date.now();
+      name = name.replace(/[\\/:*?"<>|]/g, '_');
+      const path = join(DL_DIR, name);
+      writeFileSync(path, buf);
+      out.savedTo = path;
+      out.bytes = buf.length;
+      return out;
+    }
+    const text = r.text || '';
+    if (opts.json) {
+      try { out.json = JSON.parse(text); return out; } catch {}
+    }
+    if (text.length > 100000) { out.text = text.slice(0, 100000); out.truncated = true; }
+    else out.text = text;
+    return out;
+  }
+  // apiFallback(pathOrUrl, opts): the BOUNDED form of Aside's
+  // "reverse-engineer the site's internal API" move — read data from a
+  // same-origin endpoint the page's own session can already reach
+  // (typically one the page itself calls) when DOM extraction fails.
+  // HARD BOUNDARY: this is a data-read fallback, NEVER an access-denial
+  // workaround. On 401/403 it throws api_fallback_access_denied and the
+  // caller must stop and follow the chain rules (report, switch exit) —
+  // no retrying around the denial, no escalation. Same-origin + session
+  // rules are inherited from fetchInPage.
+  async apiFallback(pathOrUrl, opts = {}) {
+    const r = await this.fetchInPage(pathOrUrl, { ...opts, json: opts.json !== false });
+    if (r.status === 401 || r.status === 403) {
+      throw new Error('api_fallback_access_denied: HTTP ' + r.status + ' for ' + r.url + ' — stop and report / switch exit per chain rules; do not work around an access denial');
+    }
+    return r;
+  }
+  // --- PDF + annotated screenshot (2026-11-27, Aside transplant ⑤) ---
+  // pdf(opts): Page.printToPDF -> state downloads dir. Returns {path, bytes}.
+  async pdf(opts = {}) {
+    const r = await this.cdp('Page.printToPDF', {
+      printBackground: opts.printBackground !== false,
+      landscape: !!opts.landscape,
+      paperWidth: Number(opts.paperWidth || 8.27),
+      paperHeight: Number(opts.paperHeight || 11.69),
+    });
+    const buf = Buffer.from(r.data, 'base64');
+    mkdirSync(DL_DIR, { recursive: true });
+    const name = (opts.name || ('page-' + Date.now() + '.pdf')).replace(/[\\/:*?"<>|]/g, '_');
+    const path = join(DL_DIR, name);
+    writeFileSync(path, buf);
+    return { path, bytes: buf.length };
+  }
+  // annotatedScreenshot(opts): screenshot with the elements() e-ids
+  // drawn over the page as outline boxes + labels (Aside's
+  // annotatedScreenshot). The overlay is injected, captured, removed.
+  // Returns {path, count, elements, bytes} (PNG in the downloads dir).
+  async annotatedScreenshot(opts = {}) {
+    const els = await this.elements();
+    const drawn = await this.evaluate(() => {
+      document.querySelectorAll('.__muse_anno').forEach(e => e.remove());
+      let n = 0;
+      document.querySelectorAll('[data-muse-id]').forEach((el) => {
+        const r = el.getBoundingClientRect();
+        if (r.width === 0 && r.height === 0) return;
+        const box = document.createElement('div');
+        box.className = '__muse_anno';
+        box.style.cssText = 'position:absolute;z-index:2147483647;pointer-events:none;border:2px solid #ff3355;box-sizing:border-box;left:' + (r.left + window.scrollX) + 'px;top:' + (r.top + window.scrollY) + 'px;width:' + r.width + 'px;height:' + r.height + 'px;';
+        const tag = document.createElement('div');
+        tag.textContent = el.getAttribute('data-muse-id');
+        tag.style.cssText = 'position:absolute;left:-2px;top:-16px;background:#ff3355;color:#fff;font:11px/14px monospace;padding:0 3px;white-space:nowrap;';
+        box.appendChild(tag);
+        document.body.appendChild(box);
+        n++;
+      });
+      return n;
+    });
+    try {
+      const data = await this.screenshot();
+      const buf = Buffer.from(data, 'base64');
+      mkdirSync(DL_DIR, { recursive: true });
+      const name = (opts.name || ('annotated-' + Date.now() + '.png')).replace(/[\\/:*?"<>|]/g, '_');
+      const path = join(DL_DIR, name);
+      writeFileSync(path, buf);
+      return { path, count: drawn, elements: els.elements.length, bytes: buf.length };
+    } finally {
+      await this.evaluate(() => {
+        document.querySelectorAll('.__muse_anno').forEach(e => e.remove());
+      }).catch(() => {});
     }
   }
   async screenshot() {

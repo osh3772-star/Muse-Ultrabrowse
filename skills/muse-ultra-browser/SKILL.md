@@ -121,6 +121,14 @@ Runtime.evaluate와 교착한다 (상세: `~/workspace/ultra-harness-2026-11-26.
 - `await p.waitForDownload({timeoutMs=30000, filename?, url?})` — 완료: `{completed:true, path, bytes, filename, url, guid}` (path는 상태 디렉터리 `~/.local/share/muse-ultra-browser/downloads/` 아래 파일, bytes는 디스크 실측 크기). 취소: `{completed:false, state:'canceled', …}`, 시간 초과: `{completed:false, state:'timeout', pending:[…]}` — 예외가 아니라 보고 객체를 돌려주니 호출자가 다음 행동을 정한다. 다운로드 동작(allow+저장 경로)은 첫 페이지가 생길 때 데몬 전역으로 무장되므로, 클릭으로 시작된 다운로드도 나중에 `waitForDownload`로 회수할 수 있고, 호출 5초 전까지 시작된 것도 매칭된다.
 - 검증 (2026-11-27): data: 테스트 페이지에서 window.open 팝업 신호 포착, data: 다운로드 completed·26바이트·디스크 내용 일치, drain에 started/completed 수신 — 백업 `meta-muse-ultra/backup-aside-step2-2026-11-27/`.
 
+**a11y 상태 토큰 + 세션 fetch + PDF·annotated 스크린샷 (2026-11-27 신설, Aside 이식 ⑤)**: 스냅샷 줄의 상태 표기와, 페이지 세션을 쓰는 회수 프리미티브 묶음.
+- **스냅샷 상태 토큰**: 모든 스냅샷 줄의 `[…]` bracket 안에 `ref=` 뒤로 상태 토큰이 붙는다 — `iframe`(Iframe 역할), `focused`(현재 포커스), `disabled`, `checked`(체크됨; tristate 'mixed'는 `checked=mixed`), `selected`, `expanded`/`collapsed`, `clickable`(클릭 가능 역할이거나 AX focusable). 없는 상태는 표기되지 않는다. snaptrim 문법(단일 bracket 그룹)은 그대로 유지된다. diff 비교에도 상태 변화가 `~` 변경으로 잡힌다.
+- `await p.fetchInPage(pathOrUrl, opts)` — 페이지 안에서 fetch를 실행해 **페이지 세션(쿠키)을 동반**하는 same-origin 전용 헬퍼. L0 `fetch.sh`는 브라우저 쿠키가 없어 못 받는 로그인 세션 파일·데이터 회수용. 교차 출처는 요청을 보내기 전에 거부한다. opts: `{method, headers, save, name, json}`. 텍스트/JSON은 인라인 반환(100k 상한, `truncated` 표기), 바이너리거나 `save:true`면 상태 디렉터리 `downloads/`에 저장하고 `{savedTo, bytes}`를 반환한다.
+- `await p.apiFallback(pathOrUrl, opts)` — DOM 추출이 막힐 때 페이지가 실제로 호출하는 same-origin 엔드포인트에서 데이터를 읽는 **범위가 잘린** 폴백 (fetchInPage + 기본 json). **접근 거부의 우회가 아니다**: 401/403이면 `api_fallback_access_denied` 에러를 던지니, 호출자는 그 자리에서 중단하고 체인 규칙(보고·다음 출구 전환)을 따라라. 거부 앞에서 재시도·우회를 시도하지 않는다.
+- `await p.pdf(opts)` — `Page.printToPDF`로 현재 페이지를 PDF로 저장하고 `{path, bytes}` 반환 (상태 디렉터리 `downloads/`, opts: `{name, landscape, printBackground, paperWidth, paperHeight}`).
+- `await p.annotatedScreenshot(opts)` — `elements()`의 e-id를 페이지 위에 박스+라벨로 그려 스크린샷을 저장하고 `{path, count, elements, bytes}` 반환 (PNG, 상태 디렉터리 `downloads/`). 오버레이는 촬영 직후 제거된다. 시각 확인·좌표 대조용.
+- 검증 (2026-11-27): 로컬 테스트 페이지에서 상태 토큰 10종 실측(checked는 AX tristate 문자열 'true'로 오는 것을 확인해 반영), annotated 라벨 11개 육안 확인, fetch json/save·교차출처 거부·403 구조화 에러, PDF 매직까지 18개 단언 전부 통과 — 백업 `meta-muse-ultra/backup-aside-step5-2026-11-27/`.
+
 **챌린지 감지+대기 (2026-11-27 신설)**: `-f` 스크립트에서 `await p.challenge(opts)` — ego lite의 `task.handleChallenge()`를 본뜬 **감지+대기 전용** 프리미티브. 챌린지를 클릭·풀이하지 않는다.
 - 반환: `{detected, type, passed, waitedMs, url}`. `type`은 `turnstile`/`hcaptcha`/`recaptcha-v2`/`recaptcha-v3`/`cloudflare-challenge`/`generic`/null. `passed`는 토큰 생성·위젯 소멸·(인터스티셜) 통과 이동이면 true, 미해결이면 false, recaptcha-v3(점수 기반, 관찰 불가)는 null.
 - 옵션: `timeoutMs`(기본 30000, 전체 상한), `pollMs`(기본 500), `appearMs`(기본 3000, 위젯 등장 유예), `wait:false`면 1회 탐지만.
