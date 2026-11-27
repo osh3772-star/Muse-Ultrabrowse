@@ -33,7 +33,7 @@ muse-ultra-browser(Muse Ultra Browser의 Linux 포팅)를 이 VM에서 Muse가 e
 
 ## 현재 상태 (2026-11-20) — 설치·검증 완료 ✅
 - data: 페이지 스모크 테스트 통과, https://example.com 실제 접속·스냅샷 확보 성공 (run.sh 경유 포함)
-- 데몬 status/stop 동작 확인. 종료 시 데몬·Chrome·릴레이까지 정리됨.
+- 데몬 status/stop 동작 확인. 종료 시 데몬·Chrome·릴레이까지 정리됨. (2026-11-26 정정: 지금은 stop/idle-stop이 공유 릴레이를 내리지 않는다 — 릴레이 종료는 `stop-relay.sh` 명시 실행만. 아래 stop 설명이 현행이다.)
 - **인증서 검증 ON (우회 제거)**: `--ignore-certificate-errors`를 제거하고 NSS DB 기반
   정상 신뢰로 교체 완료. 일반 사용 가능 — "공개 페이지 전용·로그인 금지" 전제는 폐지됨.
   검증 근거 (2026-11-20):
@@ -81,6 +81,21 @@ muse-ultra-browser(Muse Ultra Browser의 Linux 포팅)를 이 VM에서 Muse가 e
   snaptrim 파서가 노드로 인식 못해 트리가 붕괴하던 문제 → 정규식 수정 후 heading 47개 정상 복원.
 - `muse-ultra-browser stop`은 데몬·Chrome을 정리하지만 socat 릴레이(18080)는 남는다 (재사용되므로 무해,
   완전 종료는 `stop-relay.sh`).
+
+## 보안 경계 (2026-11-27 감사 반영)
+
+- **Chromium 샌드박스**: 실행 옵션에 `--no-sandbox --disable-setuid-sandbox`가 있다. 이 VM의
+  exec는 root로 동작하는데, root에서는 Chromium 샌드박스 자체가 기동을 거부한다
+  (실측: 플래그 없이 실행 시 "Running as root without --no-sandbox is not supported"로
+  종료). 즉 이 환경에서는 샌드박스 활성화가 불가능하고, 격리는 VM 자체의 경계와
+  출구 프록시가 담당한다. **잔존 위험**: 악성 페이지가 브라우저 프로세스를 탈취하면
+  같은 VM 안의 파일(브라우저 프로필 포함)에 닿을 수 있다. 비-root 실행 환경에서는
+  플래그를 제거하고 샌드박스를 켜야 한다. TLS 인증서 검증은 유지된다
+  (`--ignore-certificate-errors` 금지).
+- **데몬 소켓**: `cdp-daemon.sock`은 에이전트 자신의 제어 채널이다. 소켓으로 온
+  스크립트는 데몬 프로세스에서 실행되는 것이 설계이며, 페이지 콘텐츠가 코드로
+  실행되는 경로는 없다. 소켓 파일 권한은 소유자 전용(0600)으로 제한한다.
+- **다운로드**는 상태 디렉터리 아래 `downloads/`에만 저장된다.
 
 ## 지문·WebGL·콜드스타트 패스 (2026-11-20)
 전부 래퍼/설정 층에서만 수정 (하네스 본체 무수정). 실측 전/후:

@@ -148,7 +148,9 @@ Runtime.evaluate와 교착한다 (상세: `~/workspace/ultra-harness-2026-11-26.
 ## 출력 계약
 
 - 성공: 본문 + `%%CHAIN%% lane=L1 … status=ok …` 1줄, exit 0
-- 실패: 결과 1줄만, exit 1. 코드: F-IP(차단)/F-BOT(캡차)/F-EMPTY(100자 미만)/F-TIMEOUT(60초)/F-NET
+- 실패: 결과 1줄만, exit 1. 코드: F-IP(차단)/F-BOT(캡차)/F-EMPTY(100자 미만)/F-TIMEOUT(60초)/F-NET/F-AUTH(로그인 벽)
+- **로그인 벽 판정 (2026-11-27 신설)**: L1은 렌더 후 DOM에서 비밀번호 입력란을 검사해, 비밀번호 란이 있고 (로그인 경로이거나 본문이 짧으면) F-AUTH로 떨어진다. 공개 페이지에 로그인 폼이 박혀 있어도 본문이 길면 벽으로 보지 않는다. L0도 같은 규칙(서빙된 HTML 기준) + HTTP 401을 F-AUTH로 판정한다.
+- **차단 문구 corroboration (2026-11-27)**: 차단 키워드 판정은 본문 2,500자 미만일 때만 적용된다 — 차단 관련 기술 문서처럼 키워드를 인용하는 긴 정상 문서를 F-IP/F-BOT으로 오인하지 않기 위해서다 (실측 오탐: 4,199자 HTTP 200 오류 안내 문서). 실제 인터스티셜은 짧다(무신사 챌린지 1,709자).
 - 실패 본문이 꼭 필요하면 `UB_DEBUG=1`을 붙인다 (stderr로 나간다). 평소에는 붙이지 마라 — 토큰 낭비다.
 - **차단 탐지 문구 확장 (2026-11-27)**: `detect_code()`가 Cloudflare 인터스티셜의 영·한 실측 문구("Just a moment", "Performing security verification", "Checking if the site connection is secure", "Verifying you are human", "사람인지 확인하는 중", "보안 확인 수행 중")를 F-BOT로 잡는다. 종전 목록에는 이 문구들이 없어 챌린지 페이지 본문이 그대로 `status=ok`로 통과하고 routecache에 l1=ok가 7일 남는 오탐이 있었다 (무신사 실측: 수정 전 ok/1709자 → 수정 후 fail/F-BOT, 동일 1709자).
 - **본문 settle 폴링 (2026-11-27 신설)**: read/open은 네비게이션 뒤 추출 전에 본문 텍스트 길이를 폴링한다 — 1,500자 도달 또는 3회 연속 정체(최소 체류 750ms) 시 종료, 상한 기본 4초. readyState 완료만으로는 SPA 하이드레이션 전에 읽어 F-EMPTY로 떨어지던 문제(무신사 캠페인 페이지: load 시 1자 → 2초 뒤 ~2,900자)의 수정이다. `UB_SETTLE=0`으로 끄고, `UB_SETTLE_MS`로 상한을 조정한다. 1,500자 미만인 작은 페이지는 정체 판정까지 최대 ~0.75초가 더 걸린다.

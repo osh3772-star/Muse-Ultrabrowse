@@ -25,9 +25,21 @@ field() { grep '^%%CHAIN%%' "$1" 2>/dev/null | tail -1 | sed -n "s/.* $2=\([^ ]*
 body() { grep -v '^%%CHAIN%%' "$1"; }
 setcache() { python3 "$HERE/routecache.py" set "$DOMAIN" "$1" "$2" >/dev/null 2>&1; }
 fin() { # lane status code path exitcode
-  echo "%%CHAIN%% final lane=$1 status=$2 code=$3 path=$4 elapsed_s=$(elapsed)"
+  # Handoff contract (2026-11-27 audit fix, MUSE-010): exit 3 means "L2
+  # handoff REQUIRED", never "L2 succeeded" — say so in the line itself.
+  if [ "$5" = "3" ]; then
+    echo "%%CHAIN%% final lane=$1 status=$2 code=$3 path=$4 elapsed_s=$(elapsed) next_action=L2 handoff_completed=false"
+  else
+    echo "%%CHAIN%% final lane=$1 status=$2 code=$3 path=$4 elapsed_s=$(elapsed)"
+  fi
   exit "$5"
 }
+# Overall budget (MUSE-009, proportional form): per-lane timeouts already
+# bound a normal run (L0 20s + L1 60s + one in-lane retry) well under the
+# documented 5 minutes; this guard only stops pathological stacks (slow
+# daemon starts, retries) from drifting past it. CHAIN_BUDGET_S overrides.
+BUDGET="${CHAIN_BUDGET_S:-300}"
+over_budget() { awk -v e="$(elapsed)" -v b="$BUDGET" 'BEGIN{exit !(e+0 > b+0)}'; }
 
 if [ "$MODE" = "open" ]; then
   "$HERE/run.sh" open "$URL" > "$T1" 2>/dev/null
@@ -59,6 +71,10 @@ fi
 
 if [ "$L1C" = "F-IP" ] || [ "$L1C" = "F-BOT" ]; then
   fin none fail "$L1C" "$PATHREC>L1:skip($L1C)" 3
+fi
+
+if over_budget; then
+  fin L1 fail F-TIMEOUT "$PATHREC>L1:skip(budget)" 3
 fi
 
 "$HERE/run.sh" read "$URL" > "$T1" 2>/dev/null

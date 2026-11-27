@@ -42,6 +42,12 @@ python3 --version
 curl --version
 ```
 
+검증된 조합 (2026-11-27 실측, 기준 설치): Node v24.22.1, Chromium
+159.0.8154.6 (Playwright chromium-1255), Python 3.12.3. 설치 후 doctor가
+해석된 Chromium 경로와 버전을 출력하니 이 조합과 대조한다. 버전이 다르면
+동작이 달라질 수 있으며, 그 경우 `meta-muse-ultra/tests/run_tests.sh`로
+회귀부터 확인한다.
+
 `socat`·`certutil`은 비로컬 프록시·프록시 CA가 있는 환경에서만 필요하다 —
 다음 5단계의 doctor가 환경에 맞게 PASS/SKIP으로 알려준다.
 

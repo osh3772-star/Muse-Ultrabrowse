@@ -33,7 +33,7 @@
 //   -> {type:"stop"}               <- {type:"done", code:0} then daemon exits
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdirSync, writeFileSync, rmSync, openSync, existsSync, readdirSync, statSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync, openSync, existsSync, readdirSync, statSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import util from 'node:util';
@@ -1234,6 +1234,12 @@ process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
 
 server.listen(SOCK, () => {
+  // Trust boundary (2026-11-27 audit fix, MUSE-004): this socket is the
+  // agent's own control channel — scripts arriving here execute in the
+  // daemon process by design (same semantics as the old harness; page
+  // CONTENT is never executed, only client-supplied scripts). Restrict the
+  // socket to the owner so no other local user can drive the daemon.
+  try { chmodSync(SOCK, 0o600); } catch {}
   // Chrome launches lazily on the first page request; warm-up calls trigger
   // it through taskSpace/newPage. Nothing to do here.
 });

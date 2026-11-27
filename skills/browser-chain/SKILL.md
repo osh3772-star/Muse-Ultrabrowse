@@ -78,8 +78,9 @@ $META/chain.sh open <url>   # 렌더·JS·상호작용 필요 → L1
 | F-NET | 연결·프록시 오류 | L2로. 반복되면 직접 `run.sh`로 진단 (chain은 stderr를 버림) |
 | F-AUTH | 로그인 벽 | 체인 종료 → H255 agent-browser |
 
-공통: 동일 코드 2레인 연속이면 중단·보고. 전체 예산 5분.
-라우팅 캐시(도메인별, 7일)가 실패 레인을 자동 생략한다 — 신경 쓸 필요 없다.
+공통: 동일 코드 2레인 연속이면 중단·보고. 전체 예산 5분 (chain.sh가 `CHAIN_BUDGET_S`, 기본 300초로 강제).
+실패한 final 줄에는 `next_action=L2 handoff_completed=false`가 붙는다 — exit 3은 "L2 인계가 필요"라는 뜻이지 L2 실행 성공이 아니다.
+라우팅 캐시는 레인별·코드별 만료다 (2026-11-27 개정): ok/F-IP/F-BOT 7일, F-AUTH 24시간, F-NET 60초, F-TIMEOUT 120초, 그 외 300초. F-EMPTY는 페이지 단위 현상이라 캐시에 넣지 않는다. `UB_ROUTECACHE=0`으로 캐시를 끌 수 있다.
 
 ## 보고 포맷
 
