@@ -13,6 +13,8 @@
 //   page: cdp(), events(), evaluate(), goto(), snapshot(), screenshot(), close()
 //   page (input, 2026-11-26): elements(), click(), focus(), type(), typeText(), press()
 //   page (challenge, 2026-11-27): challenge()
+//   page (snapshot diff, 2026-11-27): snapshot({diff:true}) — Aside
+//     transplant step 1 of 5; see skill-dev-2026-11-27/aside-analysis/NOTE.md
 // Scripts run IN THIS PROCESS (AsyncFunction), so they see this daemon's
 // environment — identical semantics to the old harness (agent-vault relies
 // on the daemon-start environment, e.g. AGENT_VAULT_VALUE).
@@ -360,6 +362,7 @@ function refLabel(ref) {
 class UBPage {
   constructor(space, targetId, sessionId, label) {
     this.space = space; this.targetId = targetId; this.sessionId = sessionId; this.label = label;
+    this._lastSnap = null;  // Map key -> rendered line, for snapshot({diff:true})
   }
   async cdp(method, params = {}) { return cdpSend(method, params, this.sessionId); }
   // armFetch(policy, fallback): policy({url, method, resourceType, requestId})
@@ -404,35 +407,90 @@ class UBPage {
     const how = await loaded;
     if (how === 'timeout') throw new Error('goto: load timeout (15s) for ' + url);
   }
-  async snapshot() {
+  // --- Snapshot core (2026-11-27: structured entries, for diff) ---
+  // _axEntries() flattens the AX tree into entries {depth, role, name,
+  // backendId, key}. The walk mirrors the historical text walk exactly
+  // (ignored nodes emit no line and add no depth; InlineTextBox dropped —
+  // per-character fragments of a parent StaticText that bloat the
+  // snapshot ~10x and leak into snaptrim's text mode). key is the
+  // backendDOMNodeId when present, else the child-index path — stable
+  // enough across two snapshots of the same page for diffing.
+  async _axEntries() {
     const { nodes } = await this.cdp('Accessibility.getFullAXTree', {});
     const byId = new Map(nodes.map(n => [n.nodeId, n]));
-    const lines = [];
+    const entries = [];
+    const walk = (node, depth, path) => {
+      if (!node) return;
+      const role = (node.role && node.role.value) || 'generic';
+      if (role === 'InlineTextBox') return;
+      const name = node.name ? node.name.value : '';
+      let d = depth;
+      if (!node.ignored || depth === 0) {
+        entries.push({
+          depth, role, name,
+          backendId: node.backendDOMNodeId || null,
+          key: node.backendDOMNodeId ? 'b' + node.backendDOMNodeId : 'p' + path,
+        });
+        d = depth + 1;
+      }
+      (node.childIds || []).forEach((cid, i) => walk(byId.get(cid), d, path + '/' + i));
+    };
+    nodes.filter(n => !n.parentId).forEach((n, i) => walk(n, 0, String(i)));
+    return entries;
+  }
+  _renderSnapLine(e) {
+    const esc = s => String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
+    let line = '  '.repeat(e.depth) + e.role;
+    if (e.name) line += ' "' + esc(e.name) + '"';
+    if (e.backendId) line += ' [ref=' + e.backendId + ']';
+    return line;
+  }
+  // snapshot(opts) -> text tree. No opts = the historical full tree;
+  // existing callers (run.sh passes {scope:'full_page'}) are unaffected —
+  // unknown opts are ignored. Option (2026-11-27, Aside transplant ①):
+  //   diff: true — return only what changed vs this page's previous
+  //   snapshot (cskwork's {tree, diff} pattern): a header line
+  //   'snapshot-diff: +A -R ~C' then '+ '/'- '/'~ '-prefixed lines.
+  //   First diff call (no baseline) returns the full tree with a
+  //   no-baseline note. EVERY snapshot call refreshes the baseline.
+  async snapshot(opts = {}) {
+    if (!opts || typeof opts !== 'object') opts = {};
+    const entries = await this._axEntries();
+    const header = [];
     try {
       const href = await this.evaluate(() => location.href);
       const title = await this.evaluate(() => document.title);
-      lines.push('title: ' + title, 'url: ' + href);
+      header.push('title: ' + title, 'url: ' + href);
     } catch {}
-    const esc = s => String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
-    const walk = (node, depth) => {
-      if (!node) return;
-      const role = (node.role && node.role.value) || 'generic';
-      // InlineTextBox nodes are per-character layout fragments of a parent
-      // StaticText — emitting them bloats the snapshot ~10x and leaks
-      // space-separated characters into snaptrim's text mode. Drop them.
-      if (role === 'InlineTextBox') return;
-      const name = node.name ? node.name.value : '';
-      if (!node.ignored || depth === 0) {
-        let line = '  '.repeat(depth) + role;
-        if (name) line += ' "' + esc(name) + '"';
-        if (node.backendDOMNodeId) line += ' [ref=' + node.backendDOMNodeId + ']';
-        lines.push(line);
-        depth++;
-      }
-      for (const cid of node.childIds || []) walk(byId.get(cid), depth);
-    };
-    for (const n of nodes) if (!n.parentId) walk(n, 0);
-    return lines.join('\n');
+    const rendered = entries.map(e => this._renderSnapLine(e));
+    if (opts.diff) return this._diffSnapshot(entries, rendered, header);
+    this._lastSnap = new Map(entries.map((e, i) => [e.key, rendered[i]]));
+    return header.concat(rendered).join('\n');
+  }
+  _diffSnapshot(entries, rendered, header) {
+    const cur = new Map(entries.map((e, i) => [e.key, rendered[i]]));
+    const prev = this._lastSnap;
+    this._lastSnap = cur;
+    if (!prev) {
+      return header.concat(['snapshot-diff: no baseline yet — full tree below'], rendered).join('\n');
+    }
+    const out = [];
+    let added = 0, removed = 0, changed = 0;
+    entries.forEach((e, i) => {
+      const line = rendered[i];
+      if (!prev.has(e.key)) { out.push('+ ' + line); added++; }
+      else if (prev.get(e.key) !== line) { out.push('~ ' + line); changed++; }
+    });
+    for (const [k, line] of prev) {
+      if (!cur.has(k)) { out.push('- ' + line); removed++; }
+    }
+    const MAXD = 200;
+    const shown = out.slice(0, MAXD);
+    if (out.length > MAXD) shown.push('... diff truncated (' + (out.length - MAXD) + ' more lines)');
+    return header.concat(
+      ['snapshot-diff: +' + added + ' -' + removed + ' ~' + changed],
+      shown.length ? shown : ['(no changes)'],
+    ).join('\n');
   }
   // --- Input primitives (transplanted from muse-desktop chromeControl) ---
   // elements(): interactive-element snapshot with e-ids + center coords.

@@ -99,6 +99,12 @@ Runtime.evaluate와 교착한다 (상세: `~/workspace/ultra-harness-2026-11-26.
 - 기존 AX `p.snapshot()`은 그대로 있다 (구조 파악용). 좌표 클릭이 필요하면 `elements()` 쪽.
 - 이식 상세·백업: 데몬 주석(Transplanted 2026-11-26), 백업 `meta-muse-ultra/backup-input-2026-11-26/`. 검증: data: 테스트 페이지에서 elements→click(버튼 핸들러 발동)·type·press('Enter' keydown 발동)·clear 교체·셀렉터 클릭 전부 통과, 기존 `--fp` read 회귀 없음(위키 5.8초), 검증 구간 카드 0장(종료 후 65초 대기해 history로 셈).
 
+**스냅샷 diff (2026-11-27 신설, Aside 이식 ①)**: `-f` 스크립트에서 `await p.snapshot({diff:true})` — 직전 스냅샷 대비 변경분만 반환한다 (cskwork 패턴). 액션 후 전체 트리를 다시 받는 토큰 낭비를 줄이는 용도.
+- 반환 형식: 헤더(title/url) + `snapshot-diff: +A -R ~C` 줄 + `+ `(추가)/`- `(삭제)/`~ `(변경) 접두 줄들. 변경이 없으면 `(no changes)`.
+- 기준선(baseline)은 **모든** snapshot 호출이 갱신한다 — 일반 `p.snapshot()`을 부른 직후의 diff는 `(no changes)`가 정상. 첫 diff 호출(기준선 없음)은 전체 트리 + `no baseline yet` 주석을 반환한다.
+- 비교 키는 backendDOMNodeId(없으면 트리 경로)라, 같은 페이지의 연속 스냅샷에서만 의미가 있다. 페이지가 통째로 바뀌면 diff가 아니라 전체 스냅샷을 새로 받아라.
+- 옵션이 없는 `p.snapshot()`과 run.sh의 호출(`{scope:"full_page"}` 포함)은 종전과 동일하게 동작한다.
+
 **챌린지 감지+대기 (2026-11-27 신설)**: `-f` 스크립트에서 `await p.challenge(opts)` — ego lite의 `task.handleChallenge()`를 본뜬 **감지+대기 전용** 프리미티브. 챌린지를 클릭·풀이하지 않는다.
 - 반환: `{detected, type, passed, waitedMs, url}`. `type`은 `turnstile`/`hcaptcha`/`recaptcha-v2`/`recaptcha-v3`/`cloudflare-challenge`/`generic`/null. `passed`는 토큰 생성·위젯 소멸·(인터스티셜) 통과 이동이면 true, 미해결이면 false, recaptcha-v3(점수 기반, 관찰 불가)는 null.
 - 옵션: `timeoutMs`(기본 30000, 전체 상한), `pollMs`(기본 500), `appearMs`(기본 3000, 위젯 등장 유예), `wait:false`면 1회 탐지만.
