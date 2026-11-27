@@ -6,6 +6,62 @@ open and read web pages through a real Chromium engine, wrapped in a
 needed, and every step reports a machine-readable result so the caller can
 decide what to do next without guessing.
 
+## Where does this get installed?
+
+**Not on your PC.** Muse Ultra Browser is a tool for a Muse *agent*, and it
+is installed inside the Linux VM where the agent itself lives — the same
+environment the agent uses for its shell, its files and its skills. There is
+nothing to install on your own computer, and you never need to open a
+terminal or run a command yourself.
+
+The intended way to set it up is to hand your Muse the GitHub address and
+let the agent do the whole job inside its VM: clone the repository, check
+the environment (`doctor`), register the bundled skills, and run a working
+test — then report the result back to you. The next section gives you a
+prompt to copy-paste for exactly that.
+
+## Let your agent install it
+
+Copy one of the prompts below into a chat with your Muse, as-is. The agent
+will follow the agent-only install procedure at the top of
+[INSTALL.md](INSTALL.md) and report back when the working test passes.
+
+English:
+
+```text
+Please install Muse Ultra Browser inside your own VM from this repository:
+https://github.com/osh3772-star/Muse-Ultrabrowse
+
+Follow the agent-only install procedure at the top of INSTALL.md, exactly:
+1. Clone the repository to ~/workspace/muse-ultra-browser-build (the bundled skills expect the harness at ~/workspace/muse-ultra-browser-build/meta-muse-ultra).
+2. Check the prerequisites and install what is missing (Node.js 22 or newer, Chromium via `npx playwright install chromium`, python3, curl; socat and certutil only if the doctor says my environment needs them).
+3. Create config.env from config.env.example, keeping the defaults.
+4. Run ./doctor.sh --smoke in meta-muse-ultra/ and fix every FAIL item.
+5. Register the skills: copy every directory under the repository's skills/ into my custom skills directory (~/workspace/custom-skills/).
+6. Run ./run.sh warm, then ./run.sh read https://example.com as the working test.
+7. Report back to me: the doctor result, the %%CHAIN%% result line from the read test, and the paths where everything was installed.
+
+Everything happens inside your VM — do not ask me to install anything on my PC.
+```
+
+한국어:
+
+```text
+이 저장소로 뮤즈 울트라브라우즈를 너의 VM 안에 설치해 줘:
+https://github.com/osh3772-star/Muse-Ultrabrowse
+
+INSTALL.md 맨 위의 "에이전트 전용 설치 절차"를 정확히 따라 줘:
+1. 저장소를 ~/workspace/muse-ultra-browser-build 에 클론해 줘 (스킬들이 ~/workspace/muse-ultra-browser-build/meta-muse-ultra 경로를 기대해).
+2. 전제 조건을 확인하고 없는 것만 설치해 줘 (Node.js 22 이상, `npx playwright install chromium`으로 Chromium, python3, curl. socat·certutil은 doctor가 필요하다고 할 때만).
+3. config.env.example을 config.env로 복사해 줘 (기본값 유지).
+4. meta-muse-ultra/에서 ./doctor.sh --smoke 를 실행하고 FAIL 항목을 전부 고쳐 줘.
+5. 스킬을 등록해 줘: 저장소의 skills/ 아래 디렉터리 전부를 내 커스텀 스킬 위치(~/workspace/custom-skills/)로 복사해 줘.
+6. ./run.sh warm 후 ./run.sh read https://example.com 으로 작동 테스트를 해 줘.
+7. 결과를 보고해 줘: doctor 결과, read 테스트의 %%CHAIN%% 결과 줄, 설치된 경로.
+
+전부 너의 VM 안에서 진행하고, 내 PC에는 아무것도 설치하지 마.
+```
+
 ## Why a chain?
 
 A single browsing method is a bad fit for every page:
@@ -90,7 +146,9 @@ and `stop` shuts everything down immediately.
 
 ## Install
 
-Full procedure: [INSTALL.md](INSTALL.md). Outline:
+Full procedure: [INSTALL.md](INSTALL.md). If you are a Muse agent installing
+this into your own VM, follow the agent-only procedure at the top of
+INSTALL.md instead of this outline. Outline:
 
 1. Clone this repository — there is no separate launcher binary; the
    daemon, client and wrapper scripts live in `meta-muse-ultra/`.

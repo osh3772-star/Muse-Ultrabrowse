@@ -7,6 +7,101 @@
 npm 의존성 0. 별도로 설치할 바이너리는 없고, 저장소를 클론하면 구성 파일이 전부
 들어 있다. `run.sh`가 이 데몬을 통해 Chromium을 운전한다.
 
+## 에이전트 전용 설치 절차 (뮤즈 VM에 직접 설치)
+
+이 도구는 사용자의 PC가 아니라 **뮤즈 에이전트가 사는 Linux VM 안**에
+설치한다. 사용자가 GitHub 주소만 전달하면, 에이전트는 아래 순서를 그대로
+실행해 설치를 끝내고 결과를 보고한다. 모든 단계는 에이전트 VM 안에서
+실행하며, 사용자 PC에는 아무것도 설치하지 않는다. 단계별 상세 설명은 아래
+"사전 요건"·"설치 절차" 절에 있으니, 막히는 단계에서는 그쪽을 참조한다.
+
+### 1. 저장소 클론 (경로 고정)
+
+스킬(`skills/muse-ultra-browser` 등)이 하네스 경로를
+`~/workspace/muse-ultra-browser-build/meta-muse-ultra`로 기대하므로 클론
+위치를 이 경로로 고정한다.
+
+```bash
+git clone https://github.com/osh3772-star/Muse-Ultrabrowse ~/workspace/muse-ultra-browser-build
+cd ~/workspace/muse-ultra-browser-build/meta-muse-ultra
+chmod +x *.sh
+```
+
+같은 위치에 이전 설치가 있으면, 덮어쓰기 전에 기존 `profile/`·`config.env`
+(로그인 세션·설정)의 보존부터 판단한다 — 세션이 살아 있는 설치를 새 클론으로
+교체하지 않는다.
+
+### 2. 전제 조건 확인·설치
+
+아래 "사전 요건" 표의 항목을 확인하고, 없는 것만 설치한다.
+
+```bash
+node --version                    # ≥ 22 여야 한다
+npx playwright install chromium   # Chromium 본체
+python3 --version
+curl --version
+```
+
+`socat`·`certutil`은 비로컬 프록시·프록시 CA가 있는 환경에서만 필요하다 —
+다음 5단계의 doctor가 환경에 맞게 PASS/SKIP으로 알려준다.
+
+### 3. 설정 파일
+
+```bash
+cp config.env.example config.env
+```
+
+기본값 그대로 둔다. 항목별 의미는 아래 "설치 절차 2. 설정 파일"을 참조한다.
+
+### 4. NSS DB (조건부)
+
+egress 프록시가 TLS를 중계하는 환경에서만 실행한다 (프록시 CA가 없는
+환경에서는 건너뛴다). 상세는 아래 "설치 절차 4"를 참조한다.
+
+```bash
+./ensure-nssdb.sh
+```
+
+### 5. 환경 진단
+
+```bash
+./doctor.sh --smoke
+```
+
+FAIL 항목이 있으면 그 항목부터 고치고 다시 실행한다. 전부 PASS(조건부
+항목은 SKIP 가능)가 될 때까지 다음 단계로 넘어가지 않는다. `--smoke`는 임시
+상태/프로필로 데몬 기동 → eval 왕복 → 정지를 확인하므로 실제 프로필은
+건드리지 않는다.
+
+### 6. 스킬 등록
+
+저장소의 `skills/` 아래 디렉터리 전부(`agent-vault`, `browser-chain`,
+`muse-ultra-browser`, `ultra-captcha-handling`)를 뮤즈의 커스텀 스킬
+위치로 복사한다.
+
+```bash
+cd ~/workspace/muse-ultra-browser-build
+cp -r skills/. ~/workspace/custom-skills/
+```
+
+### 7. 작동 테스트
+
+```bash
+cd ~/workspace/muse-ultra-browser-build/meta-muse-ultra
+./run.sh warm
+./run.sh read https://example.com
+```
+
+`read` 출력 끝에 `%%CHAIN%% lane=L1 mode=read status=ok ...` 결과 줄이
+붙고 종료 코드가 0이면 성공이다.
+
+### 8. 결과 보고
+
+사용자에게 다음을 보고한다: doctor 결과(PASS/FAIL/SKIP 항목), 위 read
+테스트의 `%%CHAIN%%` 결과 줄, 설치 경로
+(`~/workspace/muse-ultra-browser-build`). 설치 직후 1회 브리핑 항목은
+등록한 `muse-ultra-browser` 스킬의 "설치 직후 브리핑" 절을 따른다.
+
 ## 사전 요건
 
 | 항목 | 요건 | 용도 |
