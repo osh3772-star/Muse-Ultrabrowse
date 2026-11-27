@@ -99,6 +99,13 @@ Runtime.evaluate와 교착한다 (상세: `~/workspace/ultra-harness-2026-11-26.
 - 기존 AX `p.snapshot()`은 그대로 있다 (구조 파악용). 좌표 클릭이 필요하면 `elements()` 쪽.
 - 이식 상세·백업: 데몬 주석(Transplanted 2026-11-26), 백업 `meta-muse-ultra/backup-input-2026-11-26/`. 검증: data: 테스트 페이지에서 elements→click(버튼 핸들러 발동)·type·press('Enter' keydown 발동)·clear 교체·셀렉터 클릭 전부 통과, 기존 `--fp` read 회귀 없음(위키 5.8초), 검증 구간 카드 0장(종료 후 65초 대기해 history로 셈).
 
+**챌린지 감지+대기 (2026-11-27 신설)**: `-f` 스크립트에서 `await p.challenge(opts)` — ego lite의 `task.handleChallenge()`를 본뜬 **감지+대기 전용** 프리미티브. 챌린지를 클릭·풀이하지 않는다.
+- 반환: `{detected, type, passed, waitedMs, url}`. `type`은 `turnstile`/`hcaptcha`/`recaptcha-v2`/`recaptcha-v3`/`cloudflare-challenge`/`generic`/null. `passed`는 토큰 생성·위젯 소멸·(인터스티셜) 통과 이동이면 true, 미해결이면 false, recaptcha-v3(점수 기반, 관찰 불가)는 null.
+- 옵션: `timeoutMs`(기본 30000, 전체 상한), `pollMs`(기본 500), `appearMs`(기본 3000, 위젯 등장 유예), `wait:false`면 1회 탐지만.
+- **주의 — `--fp`에서는 위젯이 안 뜬다**: 챌린지 호스트(challenges.cloudflare.com·hcaptcha.com·www.google.com/recaptcha)가 Fetch 가로채기에 막혀 렌더링 자체가 안 되므로, `detected:false`가 "챌린지 없음"을 뜻하지 않는다. 감지·대기는 lean/일반 모드 전용.
+- 풀리지 않을 때의 절차(중단·보고·다른 출구로 전환, 자동 풀이 금지)는 **ultra-captcha-handling 스킬**을 따른다.
+- 검증 (2026-11-27): reCAPTCHA 공식 데모(google.com/recaptcha/api2/demo)에서 `recaptcha-v2` 즉시 감지, 20초 대기 후 미해결 반환(사람 클릭이 필요한 챌린지라 자동 통과 없음이 정상) — 백업 `meta-muse-ultra/backup-captcha-2026-11-27/`.
+
 ## 출력 계약
 
 - 성공: 본문 + `%%CHAIN%% lane=L1 … status=ok …` 1줄, exit 0

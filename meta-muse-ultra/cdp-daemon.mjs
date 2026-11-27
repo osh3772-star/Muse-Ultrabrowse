@@ -12,6 +12,7 @@
 //   taskSpace(name) / claimTaskSpace(id) -> { id, name, newPage(), pages(), finish({keep}) }
 //   page: cdp(), events(), evaluate(), goto(), snapshot(), screenshot(), close()
 //   page (input, 2026-11-26): elements(), click(), focus(), type(), typeText(), press()
+//   page (challenge, 2026-11-27): challenge()
 // Scripts run IN THIS PROCESS (AsyncFunction), so they see this daemon's
 // environment — identical semantics to the old harness (agent-vault relies
 // on the daemon-start environment, e.g. AGENT_VAULT_VALUE).
@@ -227,6 +228,75 @@ function buildFocusScript(ref) {
   return `(() => { const el = ${lookup}; if (!el) return false; el.focus(); return true; })()`;
 }
 
+// --- Challenge detect + wait (2026-11-27) ---
+// Modeled on ego lite's task.handleChallenge(): DETECT a visible human-
+// verification challenge and WAIT briefly for it to resolve by itself
+// (Turnstile and Cloudflare managed challenges often auto-pass in a
+// healthy session). This NEVER interacts with a challenge — no checkbox
+// clicks, no image solving, no third-party solver service. If the wait
+// expires unresolved, the caller stops and reports / switches exit (see
+// the ultra-captcha-handling skill).
+//
+// --fp interaction: under run.sh's strict Fetch policy only the target
+// host is continued, so challenge hosts (challenges.cloudflare.com,
+// hcaptcha.com, www.google.com/recaptcha) are blocked and the widget
+// never renders — challenge() finds nothing and the widget's spot on
+// the page just looks empty/broken. Detect+wait is a normal/lean-mode
+// tool; an empty challenge area under --fp means the widget was
+// intercepted, not that no challenge exists.
+const CHALLENGE_PROBE_SCRIPT = `(() => {
+  const vis = (el) => {
+    if (!el) return false;
+    const s = window.getComputedStyle(el);
+    if (s.display === 'none' || s.visibility === 'hidden') return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 0 || r.height > 0;
+  };
+  const frames = Array.from(document.querySelectorAll('iframe'));
+  const src = (f) => f.getAttribute('src') || '';
+  const tokenOf = (sel) => {
+    const el = document.querySelector(sel);
+    return !!(el && el.value);
+  };
+  const out = [];
+  // Cloudflare managed challenge / "Just a moment" interstitial. Checked
+  // first: it also loads a challenges.cloudflare.com frame, which must
+  // not be misread as a plain Turnstile widget.
+  const cfInterstitial = !!(window._cf_chl_opt
+    || document.querySelector('#challenge-form, #cf-challenge, .cf-browser-verification')
+    || /just a moment/i.test(document.title || ''));
+  if (cfInterstitial) out.push({ type: 'cloudflare-challenge', token: false });
+  // Cloudflare Turnstile widget.
+  const tsFrame = frames.find((f) => src(f).indexOf('challenges.cloudflare.com') !== -1);
+  const tsBox = document.querySelector('.cf-turnstile');
+  if (!cfInterstitial && (tsFrame || tsBox)) {
+    out.push({ type: 'turnstile', token: tokenOf('input[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]') });
+  }
+  // hCaptcha.
+  const hcFrame = frames.find((f) => src(f).indexOf('hcaptcha.com') !== -1);
+  const hcBox = document.querySelector('.h-captcha');
+  if (hcFrame || hcBox) {
+    out.push({ type: 'hcaptcha', token: tokenOf('[name="h-captcha-response"]') });
+  }
+  // reCAPTCHA v2 (checkbox / challenge iframe).
+  const rcFrame = frames.find((f) => src(f).indexOf('google.com/recaptcha') !== -1 || src(f).indexOf('recaptcha.net/recaptcha') !== -1);
+  const rcBox = document.querySelector('.g-recaptcha');
+  if (rcFrame || rcBox) {
+    out.push({ type: 'recaptcha-v2', token: tokenOf('#g-recaptcha-response, [name="g-recaptcha-response"]') });
+  } else if (document.querySelector('.grecaptcha-badge')
+    || Array.from(document.scripts).some((s) => (s.src || '').indexOf('recaptcha/api.js') !== -1 && (s.src || '').indexOf('render=') !== -1)) {
+    // reCAPTCHA v3: score-based, no user-visible challenge and no token
+    // field until execute() runs — presence only, pass state unknowable.
+    out.push({ type: 'recaptcha-v3', token: false, passive: true });
+  }
+  // Generic fallback: a visible element that names itself a captcha.
+  if (!out.length) {
+    const g = Array.from(document.querySelectorAll('[class*="captcha" i], [id*="captcha" i]')).find(vis);
+    if (g) out.push({ type: 'generic', token: false });
+  }
+  return { url: location.href, title: document.title, challenges: out };
+})()`;
+
 const SPECIAL_KEYS = {
   Enter: { key: 'Enter', code: 'Enter', vk: 13, text: '\r' },
   Tab: { key: 'Tab', code: 'Tab', vk: 9 },
@@ -424,6 +494,71 @@ class UBPage {
   async typeText(text) {
     await this.cdp('Input.insertText', { text: String(text) });
     return { chars: String(text).length };
+  }
+  // challenge(opts): detect a human-verification challenge on the page
+  // and, when one is present, wait for it to resolve on its own.
+  //   opts: { timeoutMs = 30000, pollMs = 500, appearMs = 3000, wait = true }
+  //   -> { detected, type, passed, waitedMs, url }
+  // type: 'turnstile' | 'hcaptcha' | 'recaptcha-v2' | 'recaptcha-v3'
+  //       | 'cloudflare-challenge' | 'generic' | null
+  // passed: true  — a response token appeared, the widget disappeared,
+  //                 or (interstitial) the page navigated past the check
+  //         false — still unresolved when the wait ended / none found
+  //         null  — recaptcha-v3 (score-based; pass state not observable)
+  // waitedMs covers the appearance grace + resolve wait; the whole call
+  // is bounded by ~timeoutMs. Detection + waiting ONLY: this method
+  // never clicks, types into, or solves a challenge (see the probe
+  // script's comment block for the --fp caveat).
+  async challenge(opts = {}) {
+    const timeoutMs = Math.max(0, Number(opts.timeoutMs ?? 30000));
+    const pollMs = Math.min(2000, Math.max(100, Number(opts.pollMs ?? 500)));
+    const appearMs = Math.max(0, Number(opts.appearMs ?? 3000));
+    const wait = opts.wait !== false;
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const probe = async () => {
+      try { return await this.evaluate(CHALLENGE_PROBE_SCRIPT); }
+      catch { return null; } // navigation in flight — "unknown", keep polling
+    };
+    const started = Date.now();
+    // Appearance grace: widgets inject a beat after load, so when the
+    // first probes find nothing, keep looking for up to appearMs before
+    // reporting "no challenge".
+    let first = await probe();
+    while (wait && (!first || !first.challenges || !first.challenges.length) && Date.now() - started < appearMs) {
+      await sleep(pollMs);
+      first = await probe();
+    }
+    if (!first || !first.challenges || !first.challenges.length) {
+      return { detected: false, type: null, passed: false, waitedMs: Date.now() - started, url: first ? first.url : null };
+    }
+    const type = first.challenges[0].type;
+    const startUrl = first.url;
+    if (first.challenges[0].passive) {
+      return { detected: true, type, passed: null, waitedMs: Date.now() - started, url: startUrl };
+    }
+    const resolved = (p) => {
+      if (!p) return false;
+      if (type === 'cloudflare-challenge' && p.url !== startUrl) return true;
+      if (!p.challenges || !p.challenges.length) return true;
+      const still = p.challenges.find((c) => c.type === type);
+      if (!still) return true;
+      return !!still.token;
+    };
+    if (resolved(first) || !wait) {
+      return { detected: true, type, passed: resolved(first), waitedMs: Date.now() - started, url: startUrl };
+    }
+    for (;;) {
+      const elapsed = Date.now() - started;
+      if (elapsed >= timeoutMs) {
+        const last = await probe();
+        return { detected: true, type, passed: resolved(last), waitedMs: elapsed, url: last ? last.url : startUrl };
+      }
+      await sleep(pollMs);
+      const p = await probe();
+      if (p && resolved(p)) {
+        return { detected: true, type, passed: true, waitedMs: Date.now() - started, url: p.url };
+      }
+    }
   }
   async screenshot() {
     const r = await this.cdp('Page.captureScreenshot', { format: 'png' });
