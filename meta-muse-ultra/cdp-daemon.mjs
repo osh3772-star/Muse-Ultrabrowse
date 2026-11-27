@@ -1089,6 +1089,7 @@ class UBPage {
 
 // ---------------------------------------------------------------- Task spaces
 let spaceSeq = 0;
+let cachedBrowserUA = null; // Browser.getVersion userAgent, fetched once
 const spaces = new Map(); // name -> space
 class UBSpace {
   constructor(name) {
@@ -1109,6 +1110,27 @@ class UBSpace {
     const page = new UBPage(this, targetId, sessionId, label || ('p' + (++this.pageSeq)));
     this.pages.set(page.label, page);
     try { await page.cdp('Page.enable', {}); } catch {}
+    // Pin Accept-Language on EVERY page (2026-11-27): run.sh's open/read
+    // scripts apply Emulation.setUserAgentOverride with acceptLanguage
+    // 'ko-KR,...' themselves, but -f scripts create pages directly and
+    // got the browser default — the same Cloudflare block page rendered
+    // in English there ("Just a moment") and Korean here ("보안 확인
+    // 수행 중"), splitting the detect_code phrase coverage by path.
+    // Apply the override at creation with the browser's own UA string,
+    // so only the language is pinned; run.sh's fuller override (with UA
+    // metadata) still replaces it afterwards on the open/read path.
+    try {
+      if (!cachedBrowserUA) {
+        const v = await cdpSend('Browser.getVersion', {});
+        cachedBrowserUA = v.userAgent || null;
+      }
+      if (cachedBrowserUA) {
+        await page.cdp('Emulation.setUserAgentOverride', {
+          userAgent: cachedBrowserUA,
+          acceptLanguage: 'ko-KR,ko,en-US,en',
+        });
+      }
+    } catch {}
     // Arm download capture daemon-wide from the first page, so a click
     // that starts a download is recorded even before waitForDownload().
     try { await page._ensureDownloadBehavior(); } catch {}

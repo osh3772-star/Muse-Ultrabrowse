@@ -108,7 +108,7 @@ result_line() { # mode status code chars via
 }
 detect_code() { # file -> prints F-IP|F-BOT|- based on block markers
   if grep -qiE 'attention required|sorry, you have been blocked|access denied|접속이 일시적으로 제한|접속이 제한되었습니다|비정상적인 접근이 감지' "$1"; then echo F-IP;
-  elif grep -qiE 'verify you are human|are you a robot|unusual traffic from your computer' "$1"; then echo F-BOT;
+  elif grep -qiE 'verify you are human|are you a robot|unusual traffic from your computer|just a moment|performing security verification|checking if the site connection is secure|verifying you are human|사람인지 확인하는 중|보안 확인 수행 중' "$1"; then echo F-BOT;
   else echo -; fi
 }
 
@@ -276,6 +276,40 @@ OUTEOF
   else
     NAVBLOCK="  try { await p.goto($URLJSON); } catch (e) { /* navigation committed — snapshot anyway */ }"
   fi
+  # Body settle poll (2026-11-27): the readyState settle above (or goto's
+  # load event in normal mode) can return before an SPA hydrates —
+  # measured on a Musinsa campaign page: innerText 1 char at load,
+  # ~2,900 chars 2s later, which surfaced as F-EMPTY. Before extraction,
+  # poll the body text length: stop when it reaches 1500 chars or stops
+  # growing (3 consecutive equal polls, with a 750ms minimum dwell so a
+  # not-yet-started hydration is not mistaken for stable), capped at
+  # UB_SETTLE_MS (default 4000). UB_SETTLE=0 disables. Pages that are
+  # already complete exit on the stable polls, so fast pages do not pay
+  # the cap.
+  SETTLE_MS=4000
+  [ "${UB_SETTLE:-}" = "0" ] && SETTLE_MS=0
+  [ -n "${UB_SETTLE_MS:-}" ] && SETTLE_MS=$UB_SETTLE_MS
+  SETTLEBLOCK=$(cat <<'SETLEOF'
+  {
+    const settleMaxMs = __SETTLE_MS__;
+    if (settleMaxMs > 0) {
+      const settleStart = Date.now();
+      let settleLastLen = -1, settleStable = 0;
+      while (Date.now() - settleStart < settleMaxMs) {
+        let settleLen = -1;
+        try { settleLen = await p.evaluate(() => (document.body ? (document.body.innerText || '').length : 0)); } catch (e) {}
+        if (settleLen >= 1500) break;
+        if (settleLen >= 0 && settleLen === settleLastLen) {
+          settleStable++;
+          if (settleStable >= 3 && Date.now() - settleStart >= 750) break;
+        } else { settleStable = 0; if (settleLen >= 0) settleLastLen = settleLen; }
+        await new Promise(r => setTimeout(r, 250));
+      }
+    }
+  }
+SETLEOF
+)
+  SETTLEBLOCK=${SETTLEBLOCK/__SETTLE_MS__/$SETTLE_MS}
   TMPJS=$(mktemp /tmp/meta-muse-ultra-XXXXXX.js)
   RAW=$(mktemp /tmp/meta-muse-ultra-raw-XXXXXX.txt)
   OUT=$(mktemp /tmp/meta-muse-ultra-out-XXXXXX.txt)
@@ -302,6 +336,7 @@ try {
     }
   }); } catch (e) { /* wrapper flags + profile prefs still guarantee defaults */ }
 $NAVBLOCK
+$SETTLEBLOCK
   $logline
 } finally {
   if (t) { try { await t.finish({keep: []}); } catch (e) {} }
