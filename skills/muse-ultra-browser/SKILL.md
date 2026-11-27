@@ -105,6 +105,13 @@ Runtime.evaluate와 교착한다 (상세: `~/workspace/ultra-harness-2026-11-26.
 - 비교 키는 backendDOMNodeId(없으면 트리 경로)라, 같은 페이지의 연속 스냅샷에서만 의미가 있다. 페이지가 통째로 바뀌면 diff가 아니라 전체 스냅샷을 새로 받아라.
 - 옵션이 없는 `p.snapshot()`과 run.sh의 호출(`{scope:"full_page"}` 포함)은 종전과 동일하게 동작한다.
 
+**스냅샷 스코핑 (2026-11-27 신설, Aside 이식 ③)**: `-f` 스크립트에서 `await p.snapshot({ref})` / `p.snapshot({selector})` / `p.snapshot({interactiveOnly:true})` — 큰 페이지에서 필요한 부분만 받는 용도.
+- `ref`는 스냅샷 줄에 찍히는 backendDOMNodeId(숫자), elements()의 `'e3'` id, CSS 셀렉터 문자열 중 하나. `selector`는 항상 CSS 셀렉터. 대상 요소의 서브트리만 반환하고 스코프 루트는 depth 0으로 다시 맞춰진다. 출력 헤더에 `scope: subtree of [ref=N] (K entries, depths rebased)` 줄이 붙고, 대상을 못 찾으면 `scope target not found` 에러를 던진다.
+- `interactiveOnly:true`는 상호작용 역할(button·link·checkbox·radio·tab·menuitem·option·switch·textbox·searchbox·combobox·listbox·slider·spinbutton·treeitem·gridcell) 줄만 남긴다 (들여쓰기 유지). ref/selector와 조합 가능하고, 헤더에 `scope: interactive-only` 줄이 붙는다.
+- **diff 기준선은 스코프별로 분리된다** — 무스코프 기준선 1개 + 스코프 대상별(+interactiveOnly 조합별) 기준선. 모든 snapshot 호출은 자기가 실행된 스코프의 기준선만 읽고 갱신하므로, 스코프 스냅샷이 전체 페이지 diff 기준선을 오염시키지 않는다 (역도 마찬가지). 스코프 diff의 첫 호출은 그 스코프의 전체 트리 + no-baseline 주석을 반환한다.
+- 옵션이 없는 `p.snapshot()`과 run.sh의 호출(`{scope:"full_page"}` 포함)은 종전과 동일하게 동작한다.
+- 검증 (2026-11-27): 중첩 테스트 페이지에서 selector/숫자 ref/e-ref 스코핑, interactive-only의 정적 텍스트 제외, 스코프 사용 후 전체 diff 무오염, 스코프별 diff 기준선 독립까지 31개 단언 전부 통과 — 백업 `meta-muse-ultra/backup-aside-step3-2026-11-27/`.
+
 **이벤트 신호 + 다운로드 (2026-11-27 신설, Aside 이식 ②)**: `-f` 스크립트에서 쓰는 비동기 신호·다운로드 프리미티브. 지금까지는 팝업·다운로드·탭 닫힘을 스크립트가 폴링으로 발견해야 했는데, 데몬이 선별해 신호로 준다.
 - `await p.drainEvents()` — 지난 drain 이후의 신호를 시간순 배열로: `{kind:'popup', targetId, url}`(페이지가 window.open/target=_blank로 연 팝업 탭), `{kind:'tab_closed', targetId}`(팝업 또는 우리 페이지 소멸), `{kind:'dialog', dialogType, message}`(이 페이지의 JS 다이얼로그 — `Page.handleJavaScriptDialog`로 처리하기 전까지 페이지가 멈춰 있다), `{kind:'download_started'|'download_completed'|'download_canceled', guid, url, filename, state, received, total}`. 원시 CDP 스트림은 기존 `p.events()`가 그대로 담당한다.
 - `await p.waitForEvent(kind, {timeoutMs=15000})` — 해당 kind의 첫 신호, 시간 초과면 null. 단 기다리는 동안 지나간 다른 신호도 함께 소비(drain)되니, 스트림 전체가 필요하면 `drainEvents()`를 써라.

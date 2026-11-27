@@ -18,6 +18,8 @@
 //   page (event signals + downloads, 2026-11-27): drainEvents(),
 //     waitForEvent(), downloads(), waitForDownload() — Aside transplant
 //     step 2 of 5; same NOTE.md
+//   page (snapshot scoping, 2026-11-27): snapshot({ref|selector,
+//     interactiveOnly}) — Aside transplant step 3 of 5; same NOTE.md
 // Scripts run IN THIS PROCESS (AsyncFunction), so they see this daemon's
 // environment — identical semantics to the old harness (agent-vault relies
 // on the daemon-start environment, e.g. AGENT_VAULT_VALUE).
@@ -263,6 +265,14 @@ function ensureChrome() {
 // and invalidParams() becomes a plain Error.
 const ELEMENT_ID_ATTR = 'data-muse-id';
 const MAX_SNAPSHOT_ELEMENTS = 300;
+// AX roles treated as interactive for snapshot({interactiveOnly:true})
+// (2026-11-27, Aside transplant step 3 — the role list from cskwork's
+// aside-browser-skill snapshot options).
+const AX_INTERACTIVE_ROLES = new Set([
+  'button', 'link', 'checkbox', 'radio', 'tab', 'menuitem', 'menuitemcheckbox',
+  'menuitemradio', 'option', 'switch', 'textbox', 'searchbox', 'combobox',
+  'listbox', 'slider', 'spinbutton', 'treeitem', 'gridcell',
+]);
 const SNAPSHOT_SCRIPT = `(() => {
   const ATTR = '${ELEMENT_ID_ATTR}';
   document.querySelectorAll('[' + ATTR + ']').forEach((el) => el.removeAttribute(ATTR));
@@ -462,7 +472,7 @@ function refLabel(ref) {
 class UBPage {
   constructor(space, targetId, sessionId, label) {
     this.space = space; this.targetId = targetId; this.sessionId = sessionId; this.label = label;
-    this._lastSnap = null;  // Map key -> rendered line, for snapshot({diff:true})
+    this._snapBaselines = new Map();  // scopeKey -> Map(key -> rendered line); '' is the unscoped baseline
     this._sigCursor = 0;    // drainEvents() cursor into browserSignals
     this._dlCursor = 0;     // drainEvents() cursor into downloadLog
   }
@@ -547,32 +557,109 @@ class UBPage {
     if (e.backendId) line += ' [ref=' + e.backendId + ']';
     return line;
   }
+  // _subtreeEntries(entries, backendId): the entry for backendId plus
+  // its descendants (following entries of greater depth), with depths
+  // rebased so the scope root renders at depth 0. Entry keys are NOT
+  // rebased — they stay comparable with the full tree's keys.
+  _subtreeEntries(entries, backendId) {
+    const i = entries.findIndex(e => e.backendId === backendId);
+    if (i < 0) return [];
+    const base = entries[i].depth;
+    const out = [entries[i]];
+    for (let j = i + 1; j < entries.length; j++) {
+      if (entries[j].depth <= base) break;
+      out.push(entries[j]);
+    }
+    return out.map(e => ({ ...e, depth: e.depth - base }));
+  }
+  // _scopeBackendId(opts): resolve a scope target to a backendDOMNodeId.
+  // ref may be a backendDOMNodeId (number — the [ref=N] printed in
+  // snapshot lines), an 'e3' id from elements(), or a CSS selector
+  // string; opts.selector is always CSS. The element is tagged with a
+  // throwaway attribute and resolved through the DOM domain (the AX
+  // tree itself cannot be searched by selector), then untagged.
+  async _scopeBackendId(opts) {
+    if (typeof opts.ref === 'number') return opts.ref;
+    let selector = opts.selector || null;
+    if (!selector && typeof opts.ref === 'string' && opts.ref) {
+      selector = /^e\d+$/.test(opts.ref)
+        ? '[' + ELEMENT_ID_ATTR + '="' + opts.ref + '"]'
+        : opts.ref;
+    }
+    if (!selector) return null;
+    const tagged = await this.evaluate((sel) => {
+      const el = document.querySelector(sel);
+      if (!el) return false;
+      el.setAttribute('data-muse-scope', '1');
+      return true;
+    }, selector);
+    if (!tagged) return null;
+    try {
+      const doc = await this.cdp('DOM.getDocument', { depth: 1 });
+      const q = await this.cdp('DOM.querySelector', { nodeId: doc.root.nodeId, selector: '[data-muse-scope="1"]' });
+      if (!q.nodeId) return null;
+      const desc = await this.cdp('DOM.describeNode', { nodeId: q.nodeId });
+      return desc.node.backendNodeId;
+    } finally {
+      await this.evaluate(() => {
+        const el = document.querySelector('[data-muse-scope="1"]');
+        if (el) el.removeAttribute('data-muse-scope');
+      }).catch(() => {});
+    }
+  }
   // snapshot(opts) -> text tree. No opts = the historical full tree;
   // existing callers (run.sh passes {scope:'full_page'}) are unaffected —
-  // unknown opts are ignored. Option (2026-11-27, Aside transplant ①):
+  // unknown opts are ignored. Options (2026-11-27, Aside transplant):
   //   diff: true — return only what changed vs this page's previous
   //   snapshot (cskwork's {tree, diff} pattern): a header line
   //   'snapshot-diff: +A -R ~C' then '+ '/'- '/'~ '-prefixed lines.
   //   First diff call (no baseline) returns the full tree with a
-  //   no-baseline note. EVERY snapshot call refreshes the baseline.
+  //   no-baseline note. (①)
+  //   ref / selector — scope to that element's subtree only; the
+  //   scope root renders at depth 0. (③)
+  //   interactiveOnly: true — keep only interactive-role lines
+  //   (indentation preserved). (③)
+  // Baseline rule (③ design decision): baselines are kept PER SCOPE —
+  // the unscoped baseline (key '') plus one per resolved scope target
+  // (+interactiveOnly). Scoped/filtered calls only ever read and
+  // refresh their own scope's baseline, so scoping can never pollute
+  // the full-page diff baseline (and vice versa). Every snapshot call
+  // refreshes the baseline of the scope it ran in.
   async snapshot(opts = {}) {
     if (!opts || typeof opts !== 'object') opts = {};
-    const entries = await this._axEntries();
+    let entries = await this._axEntries();
+    let scopeKey = '';
+    const notes = [];
+    if (opts.ref !== undefined || opts.selector) {
+      const backendId = await this._scopeBackendId(opts);
+      if (backendId == null) {
+        throw new Error('snapshot: scope target not found (' + (opts.selector ? 'selector ' + JSON.stringify(opts.selector) : 'ref ' + JSON.stringify(opts.ref)) + ')');
+      }
+      entries = this._subtreeEntries(entries, backendId);
+      scopeKey = 'b' + backendId;
+      notes.push('scope: subtree of [ref=' + backendId + '] (' + entries.length + ' entries, depths rebased)');
+    }
+    if (opts.interactiveOnly) {
+      entries = entries.filter(e => AX_INTERACTIVE_ROLES.has(e.role));
+      scopeKey += '|io';
+      notes.push('scope: interactive-only (' + entries.length + ' entries)');
+    }
     const header = [];
     try {
       const href = await this.evaluate(() => location.href);
       const title = await this.evaluate(() => document.title);
       header.push('title: ' + title, 'url: ' + href);
     } catch {}
+    header.push(...notes);
     const rendered = entries.map(e => this._renderSnapLine(e));
-    if (opts.diff) return this._diffSnapshot(entries, rendered, header);
-    this._lastSnap = new Map(entries.map((e, i) => [e.key, rendered[i]]));
+    if (opts.diff) return this._diffSnapshot(entries, rendered, header, scopeKey);
+    this._snapBaselines.set(scopeKey, new Map(entries.map((e, i) => [e.key, rendered[i]])));
     return header.concat(rendered).join('\n');
   }
-  _diffSnapshot(entries, rendered, header) {
+  _diffSnapshot(entries, rendered, header, scopeKey = '') {
     const cur = new Map(entries.map((e, i) => [e.key, rendered[i]]));
-    const prev = this._lastSnap;
-    this._lastSnap = cur;
+    const prev = this._snapBaselines.get(scopeKey) || null;
+    this._snapBaselines.set(scopeKey, cur);
     if (!prev) {
       return header.concat(['snapshot-diff: no baseline yet — full tree below'], rendered).join('\n');
     }
