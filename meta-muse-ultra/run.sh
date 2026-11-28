@@ -106,17 +106,27 @@ elapsed() { awk -v s="$START" -v e="$(date +%s.%N)" 'BEGIN{printf "%.1f", e-s}';
 result_line() { # mode status code chars via
   echo "%%CHAIN%% lane=L1 mode=$1 status=$2 code=$3 elapsed_s=$(elapsed) chars=$4 via=$5"
 }
-detect_code() { # file chars -> prints F-IP|F-BOT|- based on block markers
+detect_code() { # file chars -> prints F-IP|F-BOT|F-DETECT|- based on block markers
   # Corroboration (2026-11-27 audit fix, MUSE-001): a keyword alone does not
   # convict a long document — technical articles about blocking legitimately
   # contain these phrases (L0 measured false positive: 4,199-char HTTP-200
   # error guide -> F-IP). Real interstitials are short (measured Musinsa
   # challenge: 1,709 chars), so keyword verdicts require chars < 2500.
   # Same rule and phrase list as fetch.sh.
+  # F-DETECT (2026-11-28, adopted from pickle-ultra-browser PUB-203): "-"
+  # means "the detector looked and found nothing". A missing/unreadable
+  # file or a grep error means the detector did not run — that is
+  # F-DETECT, never a clean page.
+  if [ ! -f "$1" ]; then echo F-DETECT; return; fi
   if [ "${2:-0}" -ge 2500 ]; then echo -; return; fi
-  if grep -qiE 'attention required|sorry, you have been blocked|access denied|접속이 일시적으로 제한|접속이 제한되었습니다|비정상적인 접근이 감지' "$1"; then echo F-IP;
-  elif grep -qiE 'verify you are human|are you a robot|unusual traffic from your computer|just a moment|performing security verification|checking if the site connection is secure|verifying you are human|사람인지 확인하는 중|보안 확인 수행 중' "$1"; then echo F-BOT;
-  else echo -; fi
+  local rc1=0 rc2=0
+  grep -qiE 'attention required|sorry, you have been blocked|access denied|접속이 일시적으로 제한|접속이 제한되었습니다|비정상적인 접근이 감지' "$1" || rc1=$?
+  if [ $rc1 -eq 0 ]; then echo F-IP; return; fi
+  if [ $rc1 -ge 2 ]; then echo F-DETECT; return; fi
+  grep -qiE 'verify you are human|are you a robot|unusual traffic from your computer|just a moment|performing security verification|checking if the site connection is secure|verifying you are human|사람인지 확인하는 중|보안 확인 수행 중' "$1" || rc2=$?
+  if [ $rc2 -eq 0 ]; then echo F-BOT; return; fi
+  if [ $rc2 -ge 2 ]; then echo F-DETECT; return; fi
+  echo -
 }
 
 run_client() { # script-file -> runs the muse-ultra-browser client once, retrying

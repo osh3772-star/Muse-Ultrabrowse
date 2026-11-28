@@ -13,6 +13,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODE="${1:?usage: chain.sh read|open <url>}"
 URL="${2:?usage: chain.sh read|open <url>}"
 DOMAIN=$(python3 -c 'import sys; from urllib.parse import urlparse; print((urlparse(sys.argv[1]).hostname or "").lower())' "$URL")
+# Vault-aware routing (2026-11-28, adopted from pickle-ultra-browser): if
+# agent-vault holds a credential for this host, a login wall (F-AUTH) is
+# routed to this harness's own vault-login.mjs (exit 5) instead of L2.
+# Metadata only — vault-match.py never touches a value.
+VAULT_ENTRY=$(python3 "$HERE/vault-match.py" "$DOMAIN" 2>/dev/null || true)
 CACHE=$(python3 "$HERE/routecache.py" get "$DOMAIN" 2>/dev/null || echo "l0=- l1=-")
 L0C=$(echo "$CACHE" | sed -n 's/.*l0=\([^ ]*\).*/\1/p')
 L1C=$(echo "$CACHE" | sed -n 's/.*l1=\([^ ]*\).*/\1/p')
@@ -27,8 +32,16 @@ setcache() { python3 "$HERE/routecache.py" set "$DOMAIN" "$1" "$2" >/dev/null 2>
 fin() { # lane status code path exitcode
   # Handoff contract (2026-11-27 audit fix, MUSE-010): exit 3 means "L2
   # handoff REQUIRED", never "L2 succeeded" — say so in the line itself.
+  # Exit 5 (2026-11-28): F-AUTH and the vault holds a credential for this
+  # host — the handoff target is this harness's vault-login, not L2.
+  # Exit 1 with F-DETECT: our own detector failed; that is a hard local
+  # failure (next_action=none), never a handoff and never cached.
   if [ "$5" = "3" ]; then
     echo "%%CHAIN%% final lane=$1 status=$2 code=$3 path=$4 elapsed_s=$(elapsed) next_action=L2 handoff_completed=false"
+  elif [ "$5" = "5" ]; then
+    echo "%%CHAIN%% final lane=$1 status=$2 code=$3 path=$4 elapsed_s=$(elapsed) next_action=vault-login vault=$VAULT_ENTRY handoff_completed=false"
+  elif [ "$3" = "F-DETECT" ]; then
+    echo "%%CHAIN%% final lane=$1 status=$2 code=$3 path=$4 elapsed_s=$(elapsed) next_action=none"
   else
     echo "%%CHAIN%% final lane=$1 status=$2 code=$3 path=$4 elapsed_s=$(elapsed)"
   fi
@@ -49,6 +62,13 @@ if [ "$MODE" = "open" ]; then
     body "$T1"
     fin L1 ok - "L1:ok" 0
   fi
+  if [ "$CODE" = "F-DETECT" ]; then
+    fin L1 fail F-DETECT "L1:F-DETECT" 1
+  fi
+  if [ "$CODE" = "F-AUTH" ] && [ -n "$VAULT_ENTRY" ]; then
+    setcache l1 F-AUTH
+    fin L1 fail F-AUTH "L1:F-AUTH" 5
+  fi
   setcache l1 "${CODE:-F-NET}"
   fin L1 fail "${CODE:-F-NET}" "L1:${CODE:-F-NET}" 3
 fi
@@ -65,7 +85,9 @@ else
     body "$T0"
     fin L0 ok - "L0:ok" 0
   fi
-  setcache l0 "${CODE:-F-NET}"
+  # F-DETECT is our own detector failing, not a property of the domain:
+  # never cache it (it would poison the route for a healthy detector).
+  [ "${CODE:-}" != "F-DETECT" ] && setcache l0 "${CODE:-F-NET}"
   PATHREC="L0:${CODE:-F-NET}"
 fi
 
@@ -83,6 +105,13 @@ if [ "$ST" = "ok" ]; then
   setcache l1 ok
   body "$T1"
   fin L1 ok - "$PATHREC>L1:ok" 0
+fi
+if [ "$CODE" = "F-DETECT" ]; then
+  fin L1 fail F-DETECT "$PATHREC>L1:F-DETECT" 1
+fi
+if [ "$CODE" = "F-AUTH" ] && [ -n "$VAULT_ENTRY" ]; then
+  setcache l1 F-AUTH
+  fin L1 fail F-AUTH "$PATHREC>L1:F-AUTH" 5
 fi
 setcache l1 "${CODE:-F-NET}"
 fin L1 fail "${CODE:-F-NET}" "$PATHREC>L1:${CODE:-F-NET}" 3

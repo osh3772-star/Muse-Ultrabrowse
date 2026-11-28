@@ -148,7 +148,7 @@ Runtime.evaluate와 교착한다 (상세: `~/workspace/ultra-harness-2026-11-26.
 ## 출력 계약
 
 - 성공: 본문 + `%%CHAIN%% lane=L1 … status=ok …` 1줄, exit 0
-- 실패: 결과 1줄만, exit 1. 코드: F-IP(차단)/F-BOT(캡차)/F-EMPTY(100자 미만)/F-TIMEOUT(60초)/F-NET/F-AUTH(로그인 벽)
+- 실패: 결과 1줄만, exit 1. 코드: F-IP(차단)/F-BOT(캡차)/F-EMPTY(100자 미만)/F-TIMEOUT(60초)/F-NET/F-AUTH(로그인 벽)/F-DETECT(탐지기 자체 실패 — 페이지에 대한 판정이 아니며 캐시에도 넣지 않는다, 2026-11-28 신설)
 - **로그인 벽 판정 (2026-11-27 신설)**: L1은 렌더 후 DOM에서 비밀번호 입력란을 검사해, 비밀번호 란이 있고 (로그인 경로이거나 본문이 짧으면) F-AUTH로 떨어진다. 공개 페이지에 로그인 폼이 박혀 있어도 본문이 길면 벽으로 보지 않는다. L0도 같은 규칙(서빙된 HTML 기준) + HTTP 401을 F-AUTH로 판정한다.
 - **차단 문구 corroboration (2026-11-27)**: 차단 키워드 판정은 본문 2,500자 미만일 때만 적용된다 — 차단 관련 기술 문서처럼 키워드를 인용하는 긴 정상 문서를 F-IP/F-BOT으로 오인하지 않기 위해서다 (실측 오탐: 4,199자 HTTP 200 오류 안내 문서). 실제 인터스티셜은 짧다(무신사 챌린지 1,709자).
 - 실패 본문이 꼭 필요하면 `UB_DEBUG=1`을 붙인다 (stderr로 나간다). 평소에는 붙이지 마라 — 토큰 낭비다.
@@ -201,6 +201,23 @@ cskwork 스킬의 운용 규칙과 2026-11-27 카드 사고의 교훈을 절차�
   호출의 환경에 적용). 기록: `~/workspace/ultra-persist-change-2026-11-24.md`.
 - 메모리: 데몬 ~90MB + Chrome ~1.1GB RSS (구동 중에만).
 
+## vault-login — 유일하게 허용되는 비밀번호 입력 경로 (2026-11-28 신설, 피클 설계 채택)
+
+데몬 스크립트 표면의 `type()`/`typeText()`는 비밀번호 란 입력을 **fail-closed로 거부**한다 (`password_field_refused` — 활성 요소 판정 자체가 실패해도 거부 쪽으로 떨어진다). 스크립트로 비밀번호를 넣는 유일한 경로는 전용 드라이버 `vault-login.mjs`다:
+
+```bash
+$META/vault-login.mjs <로그인 URL> <볼트 항목> --site <호스트> [--username <아이디>]
+# 캡차·2FA 화면: 세션(태스크 공간)을 살려두고 스크린샷+상태를 남긴 뒤
+#   --wait-answer-file <파일> 로 사람의 답변 파일을 기다리거나 (읽는 즉시 삭제),
+#   종료 후 vault-login.mjs --captcha-answer <답변> --space <공간명> 으로 재접속한다.
+```
+
+- **origin/HTTPS 게이트**: 자격증명은 `--site` 호스트(정확 일치 또는 서브도메인)에 https로만 입력된다 (http는 127.0.0.1/localhost만). 볼트를 열기 전, 착지 후, 제출 후, 답변 제출 후, `chp=` 재진입 전에 매번 검사 — 리다이렉트로 다른 호스트에 가면 그 자리에서 중단한다.
+- **캡차·2FA는 사람 개입 브리지까지만**: 자동 풀이·우회는 없다. 캡차/인증 화면이 뜨면 공간을 유지하고 스크린샷(0600)과 상태 파일(0600, URL의 쿼리·프래그먼트 제거)을 남긴다. 성공 판정은 긍정 신호(같은 사이트 + 비밀번호 란 없음 + 챌린지 없음 + 에러 코드 없음)일 때만 한다.
+- 볼트 값 형식: JSON `{"username","password"}` / 탭 구분 / 두 줄 / 비밀번호 단독(아이디는 `--username`). 값은 데몬 프로세스 안에서만 풀리고 argv·출력·파일 어디에도 남지 않는다.
+- chain.sh가 F-AUTH에서 볼트 항목을 찾으면 exit 5 + `next_action=vault-login vault=<항목>`으로 이 드라이버를 지목한다 (browser-chain 스킬 참조). 항목 판정은 `vault-match.py`가 메타데이터만으로 한다.
+- 데몬 시작은 시작 락(`daemon.start.lock`, 원자적 mkdir, 15초 stale)으로 직렬화된다 — 동시 기동 경합으로 데몬이 중복 실행되지 않는다.
+
 ## 데몬 환경변수와 자격증명 (agent-vault 연동)
 
 - `-f` 스크립트는 **데몬 프로세스 안에서 실행**되므로, 스크립트가 보는 환경변수는 호출 시점이 아니라 **데몬 기동 시점의 환경**이다. 이미 떠 있는 데몬에는 나중에 export한 값이 닿지 않는다.
@@ -222,7 +239,7 @@ cskwork 스킬의 운용 규칙과 2026-11-27 카드 사고의 교훈을 절차�
 ## 경로
 
 - 래퍼 디렉토리: `~/workspace/muse-ultra-browser-build/meta-muse-ultra/` (run.sh, batch.sh, fetch.sh, chain.sh, chrome-wrapper.sh, ub-config.sh,
-  cdp-daemon.mjs, cdp-client.mjs, idle-stop.sh, stop-relay.sh, snaptrim.py, html2text.py, routecache.py, route-cache.json, config.env, config.env.example)
+  cdp-daemon.mjs, cdp-client.mjs, vault-login.mjs, vault-match.py, idle-stop.sh, stop-relay.sh, snaptrim.py, html2text.py, routecache.py, route-cache.json, config.env, config.env.example)
 - CDP 데몬 상태: `~/.local/share/muse-ultra-browser/` (cdp-daemon.sock/pid, cdp-daemon.log, cdp-chrome.log)
 - 프로필: `meta-muse-ultra/profile` / 인증서 DB: `meta-muse-ultra/chrome-home/.pki/nssdb` (자동 유지)
 - 재설계 전 백업: `meta-muse-ultra/backup-2026-11-24/`

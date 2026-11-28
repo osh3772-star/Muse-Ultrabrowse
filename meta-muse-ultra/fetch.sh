@@ -60,7 +60,13 @@ case "$HTTP" in
   *) result fail F-NET 0 "$HTTP"; exit 1 ;;
 esac
 
-python3 "$HERE/html2text.py" < "$HTML" > "$TXT" 2>/dev/null
+# Detector failure is F-DETECT, never a verdict about the page
+# (2026-11-28, adopted from pickle-ultra-browser PUB-203): if the text
+# extractor itself fails, the old code read the empty output as F-EMPTY —
+# "our tool broke" masquerading as "the page is empty".
+if ! python3 "$HERE/html2text.py" < "$HTML" > "$TXT" 2>/dev/null; then
+  result fail F-DETECT 0 "$HTTP"; exit 1
+fi
 CHARS=$(wc -m < "$TXT")
 # Login wall (MUSE-002): a password field in the served HTML plus either a
 # login-ish final URL (redirect target counts) or a short body — a public

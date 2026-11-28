@@ -153,6 +153,17 @@ else
   fi
 fi
 
+# --- vault-login readiness --------------------------------------------------------
+if [ -f "$HERE/vault-login.mjs" ] && node --check "$HERE/vault-login.mjs" 2>/dev/null; then
+  if [ -f "${MUSE_ULTRA_VAULT_PY:-$HOME/workspace/agent-vault/vault.py}" ]; then
+    ok "vault-login" "vault-login.mjs syntax OK; agent-vault present (contents never inspected)"
+  else
+    skip "vault-login" "vault-login.mjs OK; agent-vault not installed — vault logins unavailable"
+  fi
+else
+  bad "vault-login" "vault-login.mjs missing or has a syntax error" 0
+fi
+
 # --- daemon smoke (opt-in) ---------------------------------------------------------
 if [ "$SMOKE" = 1 ]; then
   SMOKE_TMP="$(mktemp -d /tmp/ub-doctor-smoke-XXXXXX)"

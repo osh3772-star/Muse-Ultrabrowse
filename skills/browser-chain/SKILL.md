@@ -31,6 +31,9 @@ $META/chain.sh open <url>   # 렌더·JS·상호작용 필요 → L1
   `%%CHAIN%% final lane=L0 status=ok code=- path=L0:ok elapsed_s=0.8`
 - 실패: 최종 1줄만 (본문 없음), **exit 3** → L2(클라우드 브라우저)로 하강해 같은 URL을 가져온다
   `%%CHAIN%% final lane=L1 status=fail code=F-IP path=L0:F-IP>L1:F-IP elapsed_s=2.8`
+- 로그인 벽(F-AUTH)인데 agent-vault에 그 호스트의 항목이 있으면 **exit 5** → L2가 아니라 이 하네스의 `vault-login.mjs`로 계속한다 (2026-11-28 신설, 볼트 인식 라우팅)
+  `%%CHAIN%% final lane=L1 status=fail code=F-AUTH path=L1:F-AUTH elapsed_s=… next_action=vault-login vault=<항목> handoff_completed=false`
+- 탐지기 자체가 실패하면(F-DETECT) **exit 1** + `next_action=none` — 페이지 판정이 아니므로 인계도 재시도도 하지 말고 도구 쪽을 먼저 본다.
 - `path=`에 레인별 결과가 전부 들어 있다. 보고는 이 줄로 만든다 (아래 포맷).
 
 ## 분류 (호출 전 1회만)
@@ -76,11 +79,12 @@ $META/chain.sh open <url>   # 렌더·JS·상호작용 필요 → L1
 | F-EMPTY | 추출 100자 미만 | chain이 레인 내 방식 변경 1회까지 자동 처리함. exit 3이면 L2로 |
 | F-TIMEOUT | L0 20초 / L1 60초 초과 | L2로 |
 | F-NET | 연결·프록시 오류 | L2로. 반복되면 직접 `run.sh`로 진단 (chain은 stderr를 버림) |
-| F-AUTH | 로그인 벽 | 체인 종료 → H255 agent-browser |
+| F-AUTH | 로그인 벽 | 볼트 항목이 있으면 exit 5 → `vault-login.mjs`로 이 하네스에서 로그인 계속. 없으면 체인 종료 → H255 agent-browser |
+| F-DETECT | 탐지기 자체 실패 (추출기·grep 오류 등) | exit 1, `next_action=none`. 인계 아님 — 도구 상태를 먼저 확인. 캐시에 남기지 않는다 |
 
 공통: 동일 코드 2레인 연속이면 중단·보고. 전체 예산 5분 (chain.sh가 `CHAIN_BUDGET_S`, 기본 300초로 강제).
 실패한 final 줄에는 `next_action=L2 handoff_completed=false`가 붙는다 — exit 3은 "L2 인계가 필요"라는 뜻이지 L2 실행 성공이 아니다.
-라우팅 캐시는 레인별·코드별 만료다 (2026-11-27 개정): ok/F-IP/F-BOT 7일, F-AUTH 24시간, F-NET 60초, F-TIMEOUT 120초, 그 외 300초. F-EMPTY는 페이지 단위 현상이라 캐시에 넣지 않는다. `UB_ROUTECACHE=0`으로 캐시를 끌 수 있다.
+라우팅 캐시는 레인별·코드별 만료다 (2026-11-27 개정): ok/F-IP/F-BOT 7일, F-AUTH 24시간, F-NET 60초, F-TIMEOUT 120초, 그 외 300초. F-EMPTY는 페이지 단위 현상이라 캐시에 넣지 않고, F-DETECT는 탐지기 상태라 역시 넣지 않는다 (2026-11-28). `UB_ROUTECACHE=0`으로 캐시를 끌 수 있다.
 
 ## 보고 포맷
 

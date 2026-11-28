@@ -765,11 +765,41 @@ class UBPage {
     await this.dispatchKey(def, modifiers, 'keyUp');
     return { pressed: key };
   }
+  // Password-field guard (2026-11-28, adopted from pickle-ultra-browser
+  // PUB-202): the general script surface never types into a password field.
+  // The one sanctioned password path is vault-login.mjs, which reads
+  // agent-vault itself and types via raw Input.insertText under an origin
+  // gate. FAIL-CLOSED: only an explicit `false` from the check ("the
+  // focused element is definitely not a password field") allows typing —
+  // if the check itself fails (navigation in flight, detached frame,
+  // unexpected result), typing is refused instead of allowed. The check
+  // reads the element's `type` *property* and autocomplete, so no
+  // attribute spelling can hide the field. The text is never echoed in
+  // the error.
+  async assertNotPasswordField() {
+    let pw = true;
+    try {
+      const res = await this.evaluate(() => {
+        const el = document.activeElement;
+        if (!el) return false;
+        const t = String(el.type || '').toLowerCase();
+        const ac = String((el.getAttribute && el.getAttribute('autocomplete')) || '').toLowerCase();
+        return t === 'password' || ac === 'current-password' || ac === 'new-password';
+      });
+      pw = res !== false;
+    } catch { pw = true; }
+    if (pw) {
+      throw new Error('password_field_refused: scripts never fill a password field — ' +
+        'use vault-login.mjs (agent-vault backed, origin-gated) for logins, ' +
+        'or hand off per chain rules (code F-AUTH)');
+    }
+  }
   // type(ref, text, {clear:true}) focuses ref, optionally clears it
   // (Ctrl+A + Backspace, as in chromeControl), then inserts text as real
   // input via Input.insertText.
   async type(ref, text, opts = {}) {
     await this.focus(ref);
+    await this.assertNotPasswordField();
     if (opts && opts.clear) {
       await this.dispatchKey({ key: 'a', code: 'KeyA', vk: 65 }, 2, 'keyDown');
       await this.dispatchKey({ key: 'a', code: 'KeyA', vk: 65 }, 2, 'keyUp');
@@ -780,6 +810,7 @@ class UBPage {
     return { typed: refLabel(ref), chars: String(text).length };
   }
   async typeText(text) {
+    await this.assertNotPasswordField();
     await this.cdp('Input.insertText', { text: String(text) });
     return { chars: String(text).length };
   }

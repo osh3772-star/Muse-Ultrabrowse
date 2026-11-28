@@ -7,13 +7,17 @@ For every row whose password cell is filled:
   2. on success the password cell in the form is blanked immediately and
      the form rewritten, and the row is reported as
          ok site=<site> cleared=yes
-  3. on failure the row is reported as
-         fail site=<site> cleared=no reason=<short code>
-     and its value stays in the form so the user can retry.
+  3. on failure the password cell is blanked the same way (2026-11-28,
+     adopted from pickle-ultra-browser's intake fix: a value that could
+     not be stored must not sit in a file waiting for a retry) and the
+     row is reported as
+         fail site=<site> cleared=yes reason=<short code>
+     Site and username stay in the form, so the user only refills the
+     password cell on the next round.
 
 When every filled row succeeded, the returned form and any extra copies
 named with --copy are shredded and removed. If anything failed, the
-(partly blanked) form is kept for a retry.
+(password-free) form is kept for a refill round.
 
 Rows with an empty password cell are left alone and counted as pending.
 
@@ -60,6 +64,16 @@ def main():
     pw_idx = header.index("password")
     dicts = ic.as_dicts(header, rows, ic.FORM_COLUMNS)
 
+    def blank_password(i):
+        """Remove row i's password from the form on disk, whatever the
+        store outcome was. Returns True when the cell is confirmed gone."""
+        rows[i][pw_idx] = ""
+        try:
+            ic.write_table(args.form, fmt, header, rows)
+            return True
+        except ValueError:
+            return False
+
     stored = pending = failed = 0
     for i, row in enumerate(dicts):
         value = row["password"].strip("\r\n")
@@ -68,19 +82,17 @@ def main():
             continue
         if not ic.valid_entry_name(row["entry"]):
             failed += 1
-            print(f"fail site={row['site']} cleared=no reason=bad-entry")
+            cleared = blank_password(i)
+            print(f"fail site={row['site']} cleared={'yes' if cleared else 'no'} reason=bad-entry")
             continue
         if ic.store_value(vault_py, row["entry"], row["purpose"], value, force=args.force):
             stored += 1
-            rows[i][pw_idx] = ""
-            try:
-                ic.write_table(args.form, fmt, header, rows)
-            except ValueError:
-                pass  # value is stored; blanking is best-effort from here
+            blank_password(i)
             print(f"ok site={row['site']} cleared=yes")
         else:
             failed += 1
-            print(f"fail site={row['site']} cleared=no reason=store-failed")
+            cleared = blank_password(i)
+            print(f"fail site={row['site']} cleared={'yes' if cleared else 'no'} reason=store-failed")
 
     if failed == 0 and stored > 0:
         ic.shred_file(args.form)
